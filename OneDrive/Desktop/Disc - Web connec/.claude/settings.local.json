@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find 'c:\\\\Users\\\\newli\\\\OneDrive\\\\Desktop\\\\Disc - Web connec' -type f -name *dashboard* -o -name *panel*)",
+      "Bash(find 'c:\\\\Users\\\\newli\\\\OneDrive\\\\Desktop\\\\Disc - Web connec/src/web/app/api' -type f \\\\\\(-name *.ts -o -name *.tsx \\\\\\))"
+    ]
+  }
+}

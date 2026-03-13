@@ -10,6 +10,7 @@ const { logSystemError } = require('./modules/errorHandler');
 const permissionCache = require('./modules/permissionCache');
 const mailTemplates = require('./modules/mailTemplates');
 const { sendSystemMail } = require('./modules/notifications');
+const { formatUser, truncate } = require('./modules/logger');
 
 // Sistem hatalarını yakala ve sadece developer kanalına gönder
 process.on('uncaughtException', (error) => {
@@ -1443,8 +1444,8 @@ const generateHelpText = (isAdmin) => {
     return { content: helpText, flags: 0 }; // ephemeral yerine flags: 0
 };
 
-// Log gönderme fonksiyonu
-async function sendLog(guildId, channelType, embed) {
+// Log gönderme fonksiyonu (kanal üzerinden — components/buton destekli)
+async function sendLog(guildId, channelType, embed, components = []) {
     try {
         const { data: logChannel } = await supabase
             .from('bot_log_channels')
@@ -1462,174 +1463,391 @@ async function sendLog(guildId, channelType, embed) {
         const channel = guild.channels.cache.get(logChannel.channel_id);
         if (!channel) return;
 
-        await channel.send({ embeds: [embed] });
+        const payload = { embeds: [embed] };
+        if (components.length > 0) payload.components = components;
+
+        await channel.send(payload);
     } catch (error) {
         console.error('Log gönderme hatası:', error);
     }
 }
 
-// Kullanıcı giriş/çıkış logları
+// ─── LOG YARDIMCILARI ─────────────────────────────────────────────────────────
+
+// "Profili Görüntüle" link butonu — 3+ yerde kullanıldığı için tek yer
+function profileButtonRow(userId) {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setLabel('Profili Görüntüle')
+            .setStyle(ButtonStyle.Link)
+            .setURL(`https://discord.com/users/${userId}`)
+            .setEmoji('👤')
+    );
+}
+
+// Audit log'dan yetkiliyi çek (ban/unban ortak kodu)
+async function fetchAuditEntry(guild, auditType, targetId) {
+    try {
+        const logs  = await guild.fetchAuditLogs({ type: auditType, limit: 1 });
+        const entry = logs.entries.first();
+        if (entry && entry.target?.id === targetId) return entry;
+    } catch { /* audit log erişimi yoksa atla */ }
+    return null;
+}
+
+// ─── ÜYE GİRİŞ LOGU ──────────────────────────────────────────────────────────
 client.on('guildMemberAdd', async (member) => {
+    if (member.user?.bot) return;
+    const user = member.user;
+    const accountAgeDays = Math.floor((Date.now() - user.createdTimestamp) / 86_400_000);
+    const isNewAccount = accountAgeDays < 7;
+
     const embed = new EmbedBuilder()
-        .setColor('#4caf50')
-        .setTitle('👋 Kullanıcı Katıldı')
-        .setDescription(`<@${member.user.id}> sunucuya katıldı`)
+        .setAuthor({
+            name: `${formatUser(user)} sunucuya katıldı`,
+            iconURL: user.displayAvatarURL({ dynamic: true, size: 128 }),
+        })
+        .setColor(isNewAccount ? '#FEE75C' : '#57F287')
+        .setDescription(isNewAccount
+            ? `> ⚠️ **Şüpheli hesap!** Bu hesap yalnızca **${accountAgeDays}** gün önce oluşturuldu.\n\n<@${user.id}> sunucuya katıldı.`
+            : `<@${user.id}> aramıza katıldı! Hoş geldin 🎉`)
         .addFields(
-            { name: 'Kullanıcı', value: `${member.user.username}#${member.user.discriminator}`, inline: true },
-            { name: 'ID', value: member.user.id, inline: true },
-            { name: 'Hesap Oluşturulma', value: `<t:${Math.floor(member.user.createdTimestamp / 1000)}:R>`, inline: true }
+            { name: '👤 Kullanıcı',          value: `<@${user.id}>\n\`${formatUser(user)}\``,          inline: true },
+            { name: '🆔 ID',                  value: `\`${user.id}\``,                                       inline: true },
+            { name: '📅 Hesap Yaşı',          value: `${accountAgeDays} gün`,                                inline: true },
+            { name: '🗓️ Hesap Açılış',       value: `<t:${Math.floor(user.createdTimestamp / 1000)}:F>`,   inline: true },
+            { name: '🏠 Toplam Üye',          value: `**${member.guild.memberCount}** üye`,                  inline: true },
         )
-        .setThumbnail(member.user.displayAvatarURL())
+        .setThumbnail(user.displayAvatarURL({ dynamic: true, size: 256 }))
+        .setFooter({ text: '📥 Üye Girişi', iconURL: member.guild.iconURL() })
         .setTimestamp();
 
-    await sendLog(member.guild.id, 'auth', embed);
+    await sendLog(member.guild.id, 'auth', embed, [profileButtonRow(user.id)]);
 });
 
+// ─── ÜYE ÇIKIŞ LOGU ──────────────────────────────────────────────────────────
 client.on('guildMemberRemove', async (member) => {
+    if (member.user?.bot) return;
+    const user = member.user;
+    const timeInServer = member.joinedAt
+        ? Math.floor((Date.now() - member.joinedAt.getTime()) / 86_400_000)
+        : null;
+
+    const roles = member.roles?.cache
+        ?.filter(r => r.id !== member.guild.id)
+        ?.map(r => `<@&${r.id}>`)
+        ?.join(' ') || '*Rol yok*';
+
     const embed = new EmbedBuilder()
-        .setColor('#f44336')
-        .setTitle('👋 Kullanıcı Ayrıldı')
-        .setDescription(`<@${member.user.id}> sunucudan ayrıldı`)
+        .setAuthor({
+            name: `${formatUser(user)} sunucudan ayrıldı`,
+            iconURL: user.displayAvatarURL({ dynamic: true, size: 128 }),
+        })
+        .setColor('#ED4245')
+        .setDescription(`<@${user.id}> sunucudan ayrıldı.`)
         .addFields(
-            { name: 'Kullanıcı', value: `${member.user.username}#${member.user.discriminator}`, inline: true },
-            { name: 'ID', value: member.user.id, inline: true },
-            { name: 'Katılma Tarihi', value: member.joinedAt ? `<t:${Math.floor(member.joinedAt.getTime() / 1000)}:R>` : 'Bilinmiyor', inline: true }
+            { name: '👤 Kullanıcı',        value: `\`${formatUser(user)}\``,    inline: true },
+            { name: '🆔 ID',               value: `\`${user.id}\``,                 inline: true },
+            ...(timeInServer !== null
+                ? [{ name: '⏱️ Sunucuda Kalış', value: `${timeInServer} gün`,      inline: true }]
+                : []),
+            { name: '🎭 Sahip Olduğu Roller', value: truncate(roles, 512),     inline: false },
         )
-        .setThumbnail(member.user.displayAvatarURL())
+        .setThumbnail(user.displayAvatarURL({ dynamic: true, size: 256 }))
+        .setFooter({ text: '📤 Üye Çıkışı', iconURL: member.guild.iconURL() })
         .setTimestamp();
 
-    await sendLog(member.guild.id, 'auth', embed);
+    await sendLog(member.guild.id, 'auth', embed, [profileButtonRow(user.id)]);
 });
 
-// Rol değişiklik logları
+// ─── ROL / TAKMAİSİM DEĞİŞİKLİK LOGU ────────────────────────────────────────
 client.on('guildMemberUpdate', async (oldMember, newMember) => {
+    if (newMember.user?.bot) return;
+    const user = newMember.user;
+
     const oldRoles = oldMember.roles.cache;
     const newRoles = newMember.roles.cache;
 
     // Rol eklendi
-    const addedRoles = newRoles.filter(role => !oldRoles.has(role.id));
-    if (addedRoles.size > 0) {
+    const addedRoles = [...newRoles.filter(role => !oldRoles.has(role.id)).values()];
+    if (addedRoles.length > 0) {
+        const roleList = addedRoles.map(r => `<@&${r.id}> — \`${r.name}\``).join('\n');
         const embed = new EmbedBuilder()
-            .setColor('#2196f3')
-            .setTitle('🎭 Rol Eklendi')
-            .setDescription(`<@${newMember.user.id}> kullanıcısına rol eklendi`)
+            .setAuthor({
+                name: `${formatUser(user)} — Rol Eklendi`,
+                iconURL: user.displayAvatarURL({ dynamic: true, size: 128 }),
+            })
+            .setColor('#5865F2')
+            .setDescription(`<@${user.id}> kullanıcısına **${addedRoles.length}** yeni rol eklendi.`)
             .addFields(
-                { name: 'Kullanıcı', value: `${newMember.user.username}#${newMember.user.discriminator}`, inline: true },
-                { name: 'Eklenen Roller', value: addedRoles.map(role => `<@&${role.id}>`).join(', '), inline: false }
+                { name: '👤 Kullanıcı',     value: `<@${user.id}>`,                    inline: true },
+                { name: '🆔 ID',            value: `\`${user.id}\``,                    inline: true },
+                { name: '➕ Eklenen Roller', value: truncate(roleList, 512),        inline: false },
             )
-            .setThumbnail(newMember.user.displayAvatarURL())
+            .setThumbnail(user.displayAvatarURL({ dynamic: true, size: 256 }))
+            .setFooter({ text: '🎭 Rol Yönetimi', iconURL: newMember.guild.iconURL() })
             .setTimestamp();
 
         await sendLog(newMember.guild.id, 'roles', embed);
     }
 
     // Rol çıkarıldı
-    const removedRoles = oldRoles.filter(role => !newRoles.has(role.id));
-    if (removedRoles.size > 0) {
+    const removedRoles = [...oldRoles.filter(role => !newRoles.has(role.id)).values()];
+    if (removedRoles.length > 0) {
+        const roleList = removedRoles.map(r => `<@&${r.id}> — \`${r.name}\``).join('\n');
         const embed = new EmbedBuilder()
-            .setColor('#ff9800')
-            .setTitle('🎭 Rol Çıkarıldı')
-            .setDescription(`<@${newMember.user.id}> kullanıcısından rol çıkarıldı`)
+            .setAuthor({
+                name: `${formatUser(user)} — Rol Çıkarıldı`,
+                iconURL: user.displayAvatarURL({ dynamic: true, size: 128 }),
+            })
+            .setColor('#FFA500')
+            .setDescription(`<@${user.id}> kullanıcısından **${removedRoles.length}** rol çıkarıldı.`)
             .addFields(
-                { name: 'Kullanıcı', value: `${newMember.user.username}#${newMember.user.discriminator}`, inline: true },
-                { name: 'Çıkarılan Roller', value: removedRoles.map(role => `<@&${role.id}>`).join(', '), inline: false }
+                { name: '👤 Kullanıcı',        value: `<@${user.id}>`,             inline: true },
+                { name: '🆔 ID',               value: `\`${user.id}\``,             inline: true },
+                { name: '➖ Çıkarılan Roller', value: truncate(roleList, 512), inline: false },
             )
-            .setThumbnail(newMember.user.displayAvatarURL())
+            .setThumbnail(user.displayAvatarURL({ dynamic: true, size: 256 }))
+            .setFooter({ text: '🎭 Rol Yönetimi', iconURL: newMember.guild.iconURL() })
+            .setTimestamp();
+
+        await sendLog(newMember.guild.id, 'roles', embed);
+    }
+
+    // Takma ad değişikliği
+    if (oldMember.nickname !== newMember.nickname) {
+        const embed = new EmbedBuilder()
+            .setAuthor({
+                name: `${formatUser(user)} — Takma Ad Değişti`,
+                iconURL: user.displayAvatarURL({ dynamic: true, size: 128 }),
+            })
+            .setColor('#5865F2')
+            .setDescription(`<@${user.id}> kullanıcısının sunucu takma adı değiştirildi.`)
+            .addFields(
+                { name: '👤 Kullanıcı', value: `<@${user.id}>`,              inline: true },
+                { name: '🆔 ID',        value: `\`${user.id}\``,              inline: true },
+                { name: '📝 Önceki Ad', value: oldMember.nickname || '*Yok*', inline: true },
+                { name: '✏️ Yeni Ad',  value: newMember.nickname || '*Yok*', inline: true },
+            )
+            .setThumbnail(user.displayAvatarURL({ dynamic: true, size: 256 }))
+            .setFooter({ text: '✏️ Takma Ad Değişikliği', iconURL: newMember.guild.iconURL() })
             .setTimestamp();
 
         await sendLog(newMember.guild.id, 'roles', embed);
     }
 });
 
-// Mesaj silme logları
+// ─── MESAJ SİLME LOGU ────────────────────────────────────────────────────────
 client.on('messageDelete', async (message) => {
-    if (message.author?.bot) return;
+    if (!message.author || message.author.bot) return;
+    const user = message.author;
+    const content = truncate(message.content || '*İçerik önbellekte yok*', 900);
+    const attachmentCount = message.attachments?.size || 0;
 
     const embed = new EmbedBuilder()
-        .setColor('#f44336')
-        .setTitle('🗑️ Mesaj Silindi')
-        .setDescription(`<#${message.channel.id}> kanalında bir mesaj silindi`)
+        .setAuthor({
+            name: `${formatUser(user)} — Mesaj Silindi`,
+            iconURL: user.displayAvatarURL({ dynamic: true, size: 128 }),
+        })
+        .setColor('#ED4245')
+        .setDescription(`📍 <#${message.channel.id}> kanalında bir mesaj silindi.`)
         .addFields(
-            { name: 'Kanal', value: `<#${message.channel.id}>`, inline: true },
-            { name: 'Yazar', value: `${message.author.username}#${message.author.discriminator}`, inline: true },
-            { name: 'ID', value: message.id, inline: true },
-            { name: 'İçerik', value: message.content || '*İçerik yok*', inline: false }
+            { name: '👤 Yazar',    value: `<@${user.id}> — \`${formatUser(user)}\``, inline: true },
+            { name: '📺 Kanal',   value: `<#${message.channel.id}>`,                    inline: true },
+            { name: '🆔 Mesaj ID', value: `\`${message.id}\``,                           inline: true },
+            { name: '🗑️ İçerik', value: `\`\`\`${content}\`\`\``,                      inline: false },
+            ...(attachmentCount > 0
+                ? [{ name: '📎 Ekler', value: `${attachmentCount} dosya silindi`, inline: true }]
+                : []),
         )
-        .setThumbnail(message.author.displayAvatarURL())
+        .setThumbnail(user.displayAvatarURL({ dynamic: true, size: 256 }))
+        .setFooter({ text: '🗑️ Mesaj Silindi', iconURL: message.guild?.iconURL?.() })
         .setTimestamp();
 
     await sendLog(message.guild.id, 'suspicious', embed);
 });
 
-// Mesaj düzenleme logları
+// ─── MESAJ DÜZENLEME LOGU ─────────────────────────────────────────────────────
 client.on('messageUpdate', async (oldMessage, newMessage) => {
-    if (newMessage.author?.bot) return;
+    if (!newMessage.author || newMessage.author.bot) return;
     if (oldMessage.content === newMessage.content) return;
+    const user = newMessage.author;
+    const before = truncate(oldMessage.content || '*Önceki içerik önbellekte yok*', 450);
+    const after  = truncate(newMessage.content || '*İçerik yok*', 450);
 
     const embed = new EmbedBuilder()
-        .setColor('#ff9800')
-        .setTitle('📝 Mesaj Düzenlendi')
-        .setDescription(`<#${newMessage.channel.id}> kanalında bir mesaj düzenlendi`)
+        .setAuthor({
+            name: `${formatUser(user)} — Mesaj Düzenlendi`,
+            iconURL: user.displayAvatarURL({ dynamic: true, size: 128 }),
+        })
+        .setColor('#FEE75C')
+        .setDescription(`📍 <#${newMessage.channel.id}> kanalında bir mesaj düzenlendi.`)
         .addFields(
-            { name: 'Kanal', value: `<#${newMessage.channel.id}>`, inline: true },
-            { name: 'Yazar', value: `${newMessage.author.username}#${newMessage.author.discriminator}`, inline: true },
-            { name: 'ID', value: newMessage.id, inline: true },
-            { name: 'Önce', value: oldMessage.content || '*İçerik yok*', inline: false },
-            { name: 'Sonra', value: newMessage.content || '*İçerik yok*', inline: false }
+            { name: '👤 Yazar',            value: `<@${user.id}> — \`${formatUser(user)}\``, inline: true },
+            { name: '📺 Kanal',            value: `<#${newMessage.channel.id}>`,                 inline: true },
+            { name: '🆔 Mesaj ID',         value: `\`${newMessage.id}\``,                         inline: true },
+            { name: '📄 Önceki İçerik',   value: `\`\`\`${before}\`\`\``,                        inline: false },
+            { name: '✏️ Güncel İçerik',  value: `\`\`\`${after}\`\`\``,                         inline: false },
         )
-        .setThumbnail(newMessage.author.displayAvatarURL())
+        .setThumbnail(user.displayAvatarURL({ dynamic: true, size: 256 }))
+        .setFooter({ text: '✏️ Mesaj Düzenlendi', iconURL: newMessage.guild?.iconURL?.() })
         .setTimestamp();
 
-    await sendLog(newMessage.guild.id, 'suspicious', embed);
+    const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setLabel('Mesaja Git')
+            .setStyle(ButtonStyle.Link)
+            .setURL(newMessage.url)
+            .setEmoji('🔗')
+    );
+
+    await sendLog(newMessage.guild.id, 'suspicious', embed, [row]);
 });
 
-// Admin komut logları (slash komutları için)
+// ─── ADMIN KOMUT LOGU (slash komutları) ──────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
 
     const { commandName } = interaction;
+    const adminCommands = ['magazaekle', 'magazasil', 'promokod', 'bakim', 'logkanal', 'logkur'];
 
-    // Admin komutları logla
-    if (['magazaekle', 'magazasil', 'promokod', 'bakim', 'logkanal', 'logkur'].includes(commandName)) {
+    if (adminCommands.includes(commandName)) {
+        const user = interaction.user;
+
+        const options = [];
+        interaction.options?.data?.forEach(opt => {
+            options.push(`\`${opt.name}\`: ${opt.value ?? '*-*'}`);
+        });
+
         const embed = new EmbedBuilder()
-            .setColor('#9c27b0')
-            .setTitle('👑 Admin Komutu Kullanıldı')
-            .setDescription(`\`/${commandName}\` komutu kullanıldı`)
+            .setAuthor({
+                name: `${formatUser(user)} — Admin Komutu`,
+                iconURL: user.displayAvatarURL({ dynamic: true, size: 128 }),
+            })
+            .setColor('#E74C3C')
+            .setDescription(`\`/${commandName}\` komutu kullanıldı.`)
             .addFields(
-                { name: 'Kullanıcı', value: `${interaction.user.username}#${interaction.user.discriminator}`, inline: true },
-                { name: 'Kanal', value: `<#${interaction.channel.id}>`, inline: true },
-                { name: 'Komut', value: `/${commandName}`, inline: true }
+                { name: '👑 Kullanıcı', value: `<@${user.id}>`,                                       inline: true },
+                { name: '📺 Kanal',     value: `<#${interaction.channel?.id ?? '0'}>`,                 inline: true },
+                { name: '📋 Komut',     value: `\`/${commandName}\``,                                  inline: true },
+                ...(options.length ? [{ name: '⚙️ Parametreler', value: options.join('\n'),           inline: false }] : []),
             )
-            .setThumbnail(interaction.user.displayAvatarURL())
+            .setThumbnail(user.displayAvatarURL({ dynamic: true, size: 256 }))
+            .setFooter({ text: '⚡ Admin Komutu', iconURL: interaction.guild?.iconURL?.() })
             .setTimestamp();
 
         await sendLog(interaction.guild.id, 'admin', embed);
     }
+});
 
-    // Settings değişiklik logları
-    if (commandName === 'logkanal') {
-        const logChannel = interaction.options.getChannel('log_kanal');
-        const systemLogChannel = interaction.options.getChannel('sistem_log_kanal');
+// ─── BAN / UNBAN LOGU ────────────────────────────────────────────────────────
+client.on('guildBanAdd', async (ban) => {
+    const user   = ban.user;
+    const entry  = await fetchAuditEntry(ban.guild, 22 /* GuildBanAdd */, user.id);
+    const reason = entry?.reason || ban.reason || '*Sebep belirtilmedi*';
 
+    const embed = new EmbedBuilder()
+        .setAuthor({ name: `${formatUser(user)} banlandı`, iconURL: user.displayAvatarURL({ dynamic: true, size: 128 }) })
+        .setColor('#ED4245')
+        .setDescription(`🔨 <@${user.id}> sunucudan **kalıcı olarak banlandı**.`)
+        .addFields(
+            { name: '👤 Kullanıcı', value: `\`${formatUser(user)}\``, inline: true },
+            { name: '🆔 ID',        value: `\`${user.id}\``,           inline: true },
+            ...(entry?.executor ? [{ name: '🛡️ Yetkili', value: `<@${entry.executor.id}>`, inline: true }] : []),
+            { name: '📋 Sebep',     value: reason,                     inline: false },
+        )
+        .setThumbnail(user.displayAvatarURL({ dynamic: true, size: 256 }))
+        .setFooter({ text: '🔨 Ban İşlemi', iconURL: ban.guild.iconURL() })
+        .setTimestamp();
+
+    await sendLog(ban.guild.id, 'auth', embed);
+});
+
+client.on('guildBanRemove', async (ban) => {
+    const user  = ban.user;
+    const entry = await fetchAuditEntry(ban.guild, 23 /* GuildBanRemove */, user.id);
+
+    const embed = new EmbedBuilder()
+        .setAuthor({ name: `${formatUser(user)} kullanıcısının banı kaldırıldı`, iconURL: user.displayAvatarURL({ dynamic: true, size: 128 }) })
+        .setColor('#57F287')
+        .setDescription(`✅ <@${user.id}> kullanıcısının **banı kaldırıldı**.`)
+        .addFields(
+            { name: '👤 Kullanıcı', value: `\`${formatUser(user)}\``, inline: true },
+            { name: '🆔 ID',        value: `\`${user.id}\``,           inline: true },
+            ...(entry?.executor ? [{ name: '🛡️ Yetkili', value: `<@${entry.executor.id}>`, inline: true }] : []),
+        )
+        .setThumbnail(user.displayAvatarURL({ dynamic: true, size: 256 }))
+        .setFooter({ text: '✅ Ban Kaldırma', iconURL: ban.guild.iconURL() })
+        .setTimestamp();
+
+    await sendLog(ban.guild.id, 'auth', embed);
+});
+
+// ─── SES KANALI GİRİŞ / ÇIKIŞ LOGU ──────────────────────────────────────────
+client.on('voiceStateUpdate', async (oldState, newState) => {
+    const member = newState.member ?? oldState.member;
+    if (!member || member.user?.bot) return;
+
+    const joinedChannel  = !oldState.channel && newState.channel;
+    const leftChannel    = oldState.channel && !newState.channel;
+    const switchedChannel = oldState.channel && newState.channel && oldState.channelId !== newState.channelId;
+
+    if (joinedChannel) {
+        const ch = newState.channel;
         const embed = new EmbedBuilder()
-            .setColor('#ff9800')
-            .setTitle('🔧 Sunucu Ayarları Değiştirildi')
-            .setDescription('Log kanalları güncellendi')
+            .setAuthor({
+                name: `${formatUser(member.user)} — Ses Kanalına Katıldı`,
+                iconURL: member.user.displayAvatarURL({ dynamic: true, size: 128 }),
+            })
+            .setColor('#00BCD4')
+            .setDescription(`🔊 <@${member.user.id}> **${ch.name}** kanalına bağlandı.`)
             .addFields(
-                { name: 'Kullanıcı', value: `${interaction.user.username}#${interaction.user.discriminator}`, inline: true },
-                { name: 'Aksiyon', value: 'Log Kanal Ayarı', inline: true }
+                { name: '👤 Kullanıcı',        value: `<@${member.user.id}>`, inline: true },
+                { name: '🔊 Kanal',            value: `**${ch.name}**`,       inline: true },
+                { name: '👥 Kanalda Bulunan',  value: `${ch.members.size} kişi`, inline: true },
             )
-            .setThumbnail(interaction.user.displayAvatarURL())
+            .setFooter({ text: '🔊 Ses Kanalı Girişi', iconURL: newState.guild.iconURL() })
             .setTimestamp();
 
-        if (logChannel) {
-            embed.addFields({ name: 'Genel Log Kanalı', value: `<#${logChannel.id}>`, inline: false });
-        }
-        if (systemLogChannel) {
-            embed.addFields({ name: 'Sistem Log Kanalı', value: `<#${systemLogChannel.id}>`, inline: false });
-        }
+        await sendLog(newState.guild.id, 'main', embed);
 
-        await sendLog(interaction.guild.id, 'settings', embed);
+    } else if (leftChannel) {
+        const ch = oldState.channel;
+        const embed = new EmbedBuilder()
+            .setAuthor({
+                name: `${formatUser(member.user)} — Ses Kanalından Ayrıldı`,
+                iconURL: member.user.displayAvatarURL({ dynamic: true, size: 128 }),
+            })
+            .setColor('#607D8B')
+            .setDescription(`🔇 <@${member.user.id}> **${ch.name}** kanalından ayrıldı.`)
+            .addFields(
+                { name: '👤 Kullanıcı', value: `<@${member.user.id}>`, inline: true },
+                { name: '🔊 Kanal',     value: `**${ch.name}**`,       inline: true },
+            )
+            .setFooter({ text: '🔇 Ses Kanalı Çıkışı', iconURL: oldState.guild.iconURL() })
+            .setTimestamp();
+
+        await sendLog(oldState.guild.id, 'main', embed);
+
+    } else if (switchedChannel) {
+        const from = oldState.channel;
+        const to   = newState.channel;
+        const embed = new EmbedBuilder()
+            .setAuthor({
+                name: `${formatUser(member.user)} — Ses Kanalı Değiştirdi`,
+                iconURL: member.user.displayAvatarURL({ dynamic: true, size: 128 }),
+            })
+            .setColor('#00BCD4')
+            .setDescription(`🔀 <@${member.user.id}> ses kanalını değiştirdi.`)
+            .addFields(
+                { name: '👤 Kullanıcı',   value: `<@${member.user.id}>`, inline: true },
+                { name: '📤 Önceki',      value: `**${from.name}**`,     inline: true },
+                { name: '📥 Yeni',        value: `**${to.name}**`,       inline: true },
+            )
+            .setFooter({ text: '🔀 Kanal Değişikliği', iconURL: newState.guild.iconURL() })
+            .setTimestamp();
+
+        await sendLog(newState.guild.id, 'main', embed);
     }
 });
 
