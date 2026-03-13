@@ -104,7 +104,7 @@ const processVoiceEarnings = async (client, guildId, requiredRoleId, earnPerVoic
         try {
             const { data } = await supabase
                 .from('servers')
-                .select('verify_role_id,voice_earn_enabled,earn_per_voice_minute,discord_id,id,tag_id,tag_bonus_voice,booster_bonus_voice')
+                .select('verify_role_id,voice_earn_enabled,earn_per_voice_minute,discord_id,id,tag_id,tag_bonus_voice,booster_bonus_voice,earn_channels')
                 .or(`discord_id.eq.${guildId},id.eq.${guildId}`)
                 .maybeSingle();
             serverCfg = data || null;
@@ -122,6 +122,22 @@ const processVoiceEarnings = async (client, guildId, requiredRoleId, earnPerVoic
         // If server has not configured a verify role, do not award anyone — they haven't accepted terms.
         if (!cfgVerifyRole) continue;
         if (!voiceEnabled) continue;
+
+        // Channel-based earning filter for voice channels
+        const earnChannels = serverCfg?.earn_channels ?? null;
+        if (earnChannels && typeof earnChannels === 'object') {
+            const mode = earnChannels.mode; // 'whitelist' or 'blacklist'
+            const voiceChList = earnChannels.voice_channels || [];
+            const voiceCatList = earnChannels.voice_categories || [];
+            const channelId = voiceState.channelId;
+            const channel = voiceState.channel;
+            const categoryId = channel?.parentId || channel?.parent_id || null;
+
+            const isInList = voiceChList.includes(channelId) || (categoryId && voiceCatList.includes(categoryId));
+
+            if (mode === 'whitelist' && !isInList) continue;
+            if (mode === 'blacklist' && isInList) continue;
+        }
 
         const isApproved = Boolean(member.roles.cache.has(cfgVerifyRole));
         if (!isApproved) continue;
@@ -168,13 +184,12 @@ const processVoiceEarnings = async (client, guildId, requiredRoleId, earnPerVoic
         console.log(`[earnings] processVoiceEarnings - guild:${guildId} member:${member.id} channel:${voiceState.channelId} base:${perMinute} bonus:${bonus} total:${total} (awarding immediately)`);
 
         // If user has the tag, record tag_granted_at in member_profiles if not already set
+        // Use Discord guild ID (not internal server UUID) to match permissionCache and web API
         if (hasTag) {
             try {
-                const serverIdResp = await supabase.from('servers').select('id').eq('discord_id', guildId).maybeSingle();
-                const serverId = serverIdResp.data?.id ?? guildId;
-                const { data: prof } = await supabase.from('member_profiles').select('tag_granted_at').eq('guild_id', serverId).eq('user_id', member.id).maybeSingle();
+                const { data: prof } = await supabase.from('member_profiles').select('tag_granted_at').eq('guild_id', guildId).eq('user_id', member.id).maybeSingle();
                 if (!prof || !prof.tag_granted_at) {
-                    await supabase.from('member_profiles').upsert({ guild_id: serverId, user_id: member.id, tag_granted_at: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: 'guild_id,user_id' });
+                    await supabase.from('member_profiles').upsert({ guild_id: guildId, user_id: member.id, tag_granted_at: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: 'guild_id,user_id' });
                 }
             } catch (e) {
                 console.warn('Failed to upsert tag_granted_at', e);

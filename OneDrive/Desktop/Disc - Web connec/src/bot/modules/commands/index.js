@@ -16,7 +16,7 @@ const getServerConfig = async (guildId) => {
     try {
             const { data } = await supabase
                         .from('servers')
-                        .select('verify_role_id,admin_role_id,discord_id,earn_per_message,message_earn_enabled,earn_per_voice_minute,voice_earn_enabled,tag_id,tag_bonus_message,tag_bonus_voice,booster_bonus_message,booster_bonus_voice')
+                        .select('verify_role_id,admin_role_id,discord_id,earn_per_message,message_earn_enabled,earn_per_voice_minute,voice_earn_enabled,tag_id,tag_bonus_message,tag_bonus_voice,booster_bonus_message,booster_bonus_voice,earn_channels')
                 .eq('discord_id', guildId)
                 .maybeSingle();
 
@@ -45,6 +45,27 @@ const handleMessage = async (message, config, addDailyEarning) => {
     const tagId = serverCfg?.tag_id ?? null;
     const tagBonusMessage = Number(serverCfg?.tag_bonus_message ?? 0) || 0;
     const boosterBonusMessage = Number(serverCfg?.booster_bonus_message ?? 0) || 0;
+    const earnChannels = serverCfg?.earn_channels ?? null;
+
+    // Channel-based earning filter: check if this channel or its category is allowed
+    if (earnChannels && typeof earnChannels === 'object') {
+        const mode = earnChannels.mode; // 'whitelist' or 'blacklist'
+        const msgChannels = earnChannels.message_channels || [];
+        const msgCategories = earnChannels.message_categories || [];
+        const channelId = message.channel.id;
+        const categoryId = message.channel.parentId || message.channel.parent_id || null;
+
+        const isInList = msgChannels.includes(channelId) || (categoryId && msgCategories.includes(categoryId));
+
+        if (mode === 'whitelist' && !isInList) {
+            // Not in whitelist, skip earning
+            return;
+        }
+        if (mode === 'blacklist' && isInList) {
+            // In blacklist, skip earning
+            return;
+        }
+    }
 
     // Ensure we have a GuildMember object (cache may be empty)
     let member = message.member;
@@ -97,13 +118,12 @@ const handleMessage = async (message, config, addDailyEarning) => {
             const total = Number((earnPerMessage + bonus).toFixed(2));
 
             // If user has the tag, record tag_granted_at in member_profiles if not already set
+            // Use Discord guild ID (not internal server UUID) to match permissionCache and web API
             if (hasTag) {
                 try {
-                    const serverIdResp = await supabase.from('servers').select('id').eq('discord_id', message.guild.id).maybeSingle();
-                    const serverId = serverIdResp.data?.id ?? message.guild.id;
-                    const { data: prof } = await supabase.from('member_profiles').select('tag_granted_at').eq('guild_id', serverId).eq('user_id', message.author.id).maybeSingle();
+                    const { data: prof } = await supabase.from('member_profiles').select('tag_granted_at').eq('guild_id', message.guild.id).eq('user_id', message.author.id).maybeSingle();
                     if (!prof || !prof.tag_granted_at) {
-                        await supabase.from('member_profiles').upsert({ guild_id: serverId, user_id: message.author.id, tag_granted_at: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: 'guild_id,user_id' });
+                        await supabase.from('member_profiles').upsert({ guild_id: message.guild.id, user_id: message.author.id, tag_granted_at: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: 'guild_id,user_id' });
                     }
                 } catch (e) {
                     console.warn('Failed to upsert tag_granted_at', e);
