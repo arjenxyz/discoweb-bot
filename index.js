@@ -805,6 +805,69 @@ client.once('ready', async () => {
 
 // Mesaj Geldiğinde (Prefix komutları için)
 client.on('messageCreate', async (message) => {
+    // Bot etiketlendiğinde bilgilendirici embed gönder
+    if (message.mentions.has(client.user) && !message.author.bot && !message.mentions.everyone) {
+        try {
+            const webUrl = process.env.WEB_URL || 'https://discoweb-test.vercel.app';
+            const guild = message.guild;
+
+            const embed = new EmbedBuilder()
+                .setColor(0x5865F2)
+                .setAuthor({
+                    name: 'DiscoWeb',
+                    iconURL: client.user.displayAvatarURL({ size: 64 }),
+                })
+                .setThumbnail(guild?.iconURL({ size: 128, dynamic: true }) ?? client.user.displayAvatarURL({ size: 128 }))
+                .setDescription(
+                    `Merhaba ${message.author}! Ben bu sunucunun web mağaza botuyum.\n\n` +
+                    `Mesaj yaz veya sesli sohbete katıl → **papel** kazan → mağazadan **rol satın al**.\n` +
+                    `Her şeyi web panelden takip edebilirsin. Başlamaya ne dersin?`
+                )
+                .addFields(
+                    {
+                        name: '💰 Nasıl Çalışır?',
+                        value: [
+                            '> 💬 Mesaj at → papel kazan',
+                            '> 🎙️ Sesli sohbete katıl → papel kazan',
+                            '> 🛒 Mağazadan rol satın al',
+                        ].join('\n'),
+                        inline: true,
+                    },
+                    {
+                        name: '⭐ Bonus Kazan',
+                        value: [
+                            '> 🏷️ Sunucu tagı tak → ekstra papel',
+                            '> 💎 Sunucuyu boostla → ekstra papel',
+                        ].join('\n'),
+                        inline: true,
+                    },
+                )
+                .setFooter({
+                    text: `${guild?.name ?? 'DiscoWeb'} • Web Mağaza`,
+                    iconURL: client.user.displayAvatarURL({ size: 64 }),
+                })
+                .setTimestamp();
+
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setLabel('Web Panele Git')
+                    .setStyle(ButtonStyle.Link)
+                    .setURL(webUrl)
+                    .setEmoji('🌐'),
+                new ButtonBuilder()
+                    .setLabel('Mağazayı Gör')
+                    .setStyle(ButtonStyle.Link)
+                    .setURL(`${webUrl}/dashboard`)
+                    .setEmoji('🛒'),
+            );
+
+            await message.reply({ embeds: [embed], components: [row] });
+        } catch (err) {
+            console.error('Bot mention embed error:', err);
+        }
+        return;
+    }
+
     try {
         await handleMessage(message, config, addDailyEarning);
     } catch (err) {

@@ -37,6 +37,28 @@ async function updateForMember(client, guildId, member) {
     };
 
     cache.set(_key(guildId, member.id), entry);
+
+    // Persist tag/boost status to member_profiles so the web panel can read it
+    try {
+      const now = new Date().toISOString();
+      const upsertData = {
+        guild_id: guildId,
+        user_id: member.id,
+        has_tag: hasTag,
+        is_booster: isBooster,
+        updated_at: now
+      };
+      if (hasTag && !entry.memberTagId) {
+        upsertData.tag_granted_at = now;
+      }
+      if (isBooster) {
+        upsertData.booster_since = member.premiumSince || member.premiumSinceTimestamp ? new Date(member.premiumSinceTimestamp || member.premiumSince).toISOString() : now;
+      }
+      await supabase.from('member_profiles').upsert(upsertData, { onConflict: 'guild_id,user_id' });
+    } catch (e) {
+      // non-critical, don't block
+    }
+
     return entry;
   } catch (e) {
     console.warn('permissionCache.updateForMember failed', e);

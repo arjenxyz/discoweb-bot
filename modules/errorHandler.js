@@ -588,10 +588,16 @@ async function saveErrorLog(errorLog) {
     try {
         const { supabase } = require('./database');
 
-        // BigInt'leri string'e çevir (JSON serialization için)
-        const safeContext = JSON.parse(JSON.stringify(errorLog.context, (key, value) =>
-            typeof value === 'bigint' ? value.toString() : value
-        ));
+        // BigInt ve circular reference koruması ile JSON serialization
+        const seen = new WeakSet();
+        const safeContext = JSON.parse(JSON.stringify(errorLog.context, (key, value) => {
+            if (typeof value === 'bigint') return value.toString();
+            if (typeof value === 'object' && value !== null) {
+                if (seen.has(value)) return '[Circular]';
+                seen.add(value);
+            }
+            return value;
+        }));
 
         await supabase
             .from('error_logs')
