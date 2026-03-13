@@ -200,8 +200,9 @@ const processStoreOrders = async (client, guildId) => {
                                 ? activeOrders[0].expires_at
                                 : nowIso;
 
+                            // duration_days now stores MINUTES (not days)
                             expiresAt = new Date(
-                                Date.parse(baseIso) + order.duration_days * 86400000,
+                                Date.parse(baseIso) + order.duration_days * 60000,
                             ).toISOString();
                         }
                     }
@@ -622,8 +623,9 @@ const processPendingOrdersAtMidnight = async (client, guildId, timezoneOffsetMin
                             ? activeOrders[0].expires_at
                             : nowIso;
 
+                        // duration_days now stores MINUTES (not days)
                         expiresAt = new Date(
-                            Date.parse(baseIso) + order.duration_days * 86400000,
+                            Date.parse(baseIso) + order.duration_days * 60000,
                         ).toISOString();
                     }
                 }
