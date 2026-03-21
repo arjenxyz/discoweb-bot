@@ -7,7 +7,8 @@
     "dev": "concurrently \"npm run bot\" \"npm run web\"",
     "bot": "cd src/bot && node index.js",
     "web": "cd src/web && npm run dev",
-    "setup": "cd src/bot && npm install && cd ../web && npm install"
+    "setup": "cd src/bot && npm install && cd ../web && npm install",
+    "vercel-build": "cd src/web && npm install && npm run build"
   },
   "keywords": [],
   "author": "",
