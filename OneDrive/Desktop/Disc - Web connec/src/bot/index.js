@@ -1247,6 +1247,154 @@ client.on('interactionCreate', async (interaction) => {
             }
             // ────────────────────────────────────────────────────────────────
 
+            // ─── IPO başvuru onay / ret butonları ────────────────────────────
+            if (customId.startsWith('ipo_approve_') || customId.startsWith('ipo_reject_')) {
+                const isApprove = customId.startsWith('ipo_approve_');
+                const applicationId = isApprove
+                    ? customId.replace('ipo_approve_', '')
+                    : customId.replace('ipo_reject_', '');
+
+                await interaction.deferUpdate();
+
+                // Başvuruyu çek
+                const { data: ipoApp } = await supabase
+                    .from('ipo_applications')
+                    .select('id, guild_id, applicant_user_id, status, proposed_price, proposed_founder_ratio, guild_stats_snapshot')
+                    .eq('id', applicationId)
+                    .maybeSingle();
+
+                if (!ipoApp || ipoApp.status !== 'pending') {
+                    await interaction.editReply({
+                        content: '⚠️ IPO başvurusu bulunamadı veya zaten işlenmiş.',
+                        components: [],
+                    });
+                    return;
+                }
+
+                if (isApprove) {
+                    const founderLots = Math.round(1_000_000 * ipoApp.proposed_founder_ratio);
+                    const publicLots = 1_000_000 - founderLots;
+
+                    // 1. Başvuruyu onayla
+                    await supabase
+                        .from('ipo_applications')
+                        .update({
+                            status: 'approved',
+                            reviewer_user_id: interaction.user.id,
+                            reviewed_at: new Date().toISOString(),
+                        })
+                        .eq('id', applicationId);
+
+                    // 2. server_listings kaydı oluştur
+                    await supabase
+                        .from('server_listings')
+                        .insert({
+                            guild_id: ipoApp.guild_id,
+                            status: 'approved',
+                            total_lots: 1_000_000,
+                            founder_lots: founderLots,
+                            public_lots: publicLots,
+                            founder_user_id: ipoApp.applicant_user_id,
+                            founder_vesting_start: new Date().toISOString(),
+                            founder_vested_lots: 0,
+                            base_price: ipoApp.proposed_price,
+                            market_price: ipoApp.proposed_price,
+                            ipo_price: ipoApp.proposed_price,
+                            listed_at: new Date().toISOString(),
+                        });
+
+                    // 3. Founder'a lotlarını ver (investor_holdings)
+                    await supabase
+                        .from('investor_holdings')
+                        .upsert({
+                            user_id: ipoApp.applicant_user_id,
+                            guild_id: ipoApp.guild_id,
+                            lot_count: founderLots,
+                            avg_buy_price: ipoApp.proposed_price,
+                            updated_at: new Date().toISOString(),
+                        }, { onConflict: 'user_id,guild_id' });
+
+                    // 4. Sunucuya bildirim gönder
+                    try {
+                        const { data: logChannelRow } = await supabase
+                            .from('bot_log_channels')
+                            .select('channel_id')
+                            .eq('guild_id', ipoApp.guild_id)
+                            .maybeSingle();
+
+                        if (logChannelRow?.channel_id) {
+                            const serverName = ipoApp.guild_stats_snapshot?.server_name ?? ipoApp.guild_id;
+                            await fetch(`https://discord.com/api/channels/${logChannelRow.channel_id}/messages`, {
+                                method: 'POST',
+                                headers: {
+                                    Authorization: `Bot ${process.env.DISCORD_TOKEN}`,
+                                    'Content-Type': 'application/json',
+                                },
+                                body: JSON.stringify({
+                                    embeds: [{
+                                        title: '📈 IPO Onaylandı — Borsaya Hoş Geldiniz!',
+                                        description: [
+                                            `**${serverName}** artık yatırım borsasında listelendi!`,
+                                            '',
+                                            `> Başlangıç fiyatı: **${ipoApp.proposed_price.toLocaleString('tr-TR')} Papel/lot**`,
+                                            `> Founder hissesi: **%${Math.round(ipoApp.proposed_founder_ratio * 100)}** (${founderLots.toLocaleString()} lot)`,
+                                            `> Halka açık: **${publicLots.toLocaleString()} lot**`,
+                                            '',
+                                            'Web panelinden lotlarınızı alıp satabilirsiniz.',
+                                        ].join('\n'),
+                                        color: 0x57F287,
+                                        timestamp: new Date().toISOString(),
+                                    }],
+                                }),
+                            });
+                        }
+                    } catch (notifyErr) {
+                        console.error('IPO notify failed:', notifyErr);
+                    }
+
+                    await interaction.editReply({
+                        embeds: [{
+                            title: '✅ IPO Onaylandı',
+                            description: `Sunucu \`${ipoApp.guild_id}\` borsaya alındı. Fiyat: **${ipoApp.proposed_price.toLocaleString()} Papel/lot**`,
+                            color: 0x57F287,
+                            fields: [
+                                { name: 'Onaylayan', value: `<@${interaction.user.id}>`, inline: true },
+                                { name: 'Founder Lotları', value: founderLots.toLocaleString(), inline: true },
+                                { name: 'Halka Açık Lotlar', value: publicLots.toLocaleString(), inline: true },
+                            ],
+                            timestamp: new Date().toISOString(),
+                        }],
+                        components: [],
+                    });
+
+                } else {
+                    await supabase
+                        .from('ipo_applications')
+                        .update({
+                            status: 'rejected',
+                            reviewer_user_id: interaction.user.id,
+                            reviewed_at: new Date().toISOString(),
+                        })
+                        .eq('id', applicationId);
+
+                    await interaction.editReply({
+                        embeds: [{
+                            title: '❌ IPO Başvurusu Reddedildi',
+                            description: `Sunucu \`${ipoApp.guild_id}\` IPO başvurusu reddedildi.`,
+                            color: 0xED4245,
+                            fields: [
+                                { name: 'Reddeden', value: `<@${interaction.user.id}>`, inline: true },
+                                { name: 'Tarih', value: new Date().toLocaleDateString('tr-TR'), inline: true },
+                            ],
+                            timestamp: new Date().toISOString(),
+                        }],
+                        components: [],
+                    });
+                }
+                return;
+            }
+            // ────────────────────────────────────────────────────────────────
+
         } catch (error) {
             console.error('Button interaction hatası:', error);
             if (!interaction.replied && !interaction.deferred) {
