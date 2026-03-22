@@ -155,6 +155,70 @@ function startBotApi({ supabase, client, port = 3000 }) {
     }
   });
 
+  // IPO başvurusu bildirimi — approve/reject butonlarıyla
+  app.post('/api/notify-ipo', async (req, res) => {
+    try {
+      if (!ensureBotApiKey(req, res)) return;
+
+      const { applicationId, guildId, guildName, applicantUserId, proposedPrice, proposedFounderRatio, statsSnapshot } = req.body;
+      if (!applicationId || !guildId) return res.status(400).json({ error: 'missing_fields' });
+
+      // basvuru_ipo kanalını bul
+      const { data: logChannel } = await supabase
+        .from('bot_log_channels')
+        .select('channel_id')
+        .eq('guild_id', process.env.DEVELOPER_GUILD_ID || guildId)
+        .eq('channel_type', 'basvuru_ipo')
+        .eq('is_active', true)
+        .maybeSingle();
+
+      if (!logChannel) return res.status(404).json({ error: 'basvuru_ipo channel not found' });
+
+      const devGuildId = process.env.DEVELOPER_GUILD_ID || guildId;
+      const devGuild = client.guilds.cache.get(devGuildId);
+      if (!devGuild) return res.status(404).json({ error: 'developer guild not found' });
+
+      const channel = devGuild.channels.cache.get(logChannel.channel_id);
+      if (!channel) return res.status(404).json({ error: 'channel not found' });
+
+      const founderPct = Math.round((proposedFounderRatio ?? 0.55) * 100);
+      const statsLines = statsSnapshot
+        ? [
+            statsSnapshot.member_count   != null ? `👥 Üye: **${statsSnapshot.member_count}**` : null,
+            statsSnapshot.active_members  != null ? `🟢 Aktif üye (30g): **${statsSnapshot.active_members}**` : null,
+            statsSnapshot.treasury_balance != null ? `🏦 Hazine: **${Number(statsSnapshot.treasury_balance).toLocaleString('tr-TR')}** Papel` : null,
+          ].filter(Boolean).join('\n')
+        : '';
+
+      const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
+
+      const embed = new EmbedBuilder()
+        .setTitle('📈 Yeni IPO Başvurusu')
+        .setColor(0x5865F2)
+        .setDescription(`**${guildName || guildId}** sunucusu borsaya girmek istiyor.`)
+        .addFields(
+          { name: '🏠 Guild ID',        value: `\`${guildId}\``,         inline: true },
+          { name: '👤 Başvuran',         value: `<@${applicantUserId}>`,  inline: true },
+          { name: '💰 Önerilen Fiyat',   value: `${(proposedPrice ?? 100).toLocaleString('tr-TR')} Papel/lot`, inline: true },
+          { name: '🎯 Founder Oranı',    value: `%${founderPct}`,         inline: true },
+          { name: '📊 Halka Açık',       value: `%${100 - founderPct}`,   inline: true },
+          ...(statsLines ? [{ name: '📋 Sunucu İstatistikleri', value: statsLines, inline: false }] : []),
+        )
+        .setTimestamp();
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`ipo_approve_${applicationId}`).setLabel('✅ Onayla').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`ipo_reject_${applicationId}`).setLabel('❌ Reddet').setStyle(ButtonStyle.Danger),
+      );
+
+      await channel.send({ embeds: [embed], components: [row] });
+      res.json({ success: true });
+    } catch (err) {
+      console.error('notify-ipo error:', err);
+      res.status(500).json({ error: 'internal' });
+    }
+  });
+
   // Invalidate server config cache endpoint
   // Expects { guildId: string } in body. If BOT_API_KEY is set, requires Authorization: Bearer <key>
   app.post('/api/invalidate-config', async (req, res) => {
