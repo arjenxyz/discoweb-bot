@@ -561,5 +561,5 @@ module.exports = {
     handleKayitCommand,
     handleProfilCommand,
     handleTopCommand,
-    handleSiparislerimCommand
+    handleSiparislerimCommand,
 };
