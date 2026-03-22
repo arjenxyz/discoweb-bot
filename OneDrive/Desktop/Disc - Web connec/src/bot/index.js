@@ -11,6 +11,7 @@ const permissionCache = require('./modules/permissionCache');
 const mailTemplates = require('./modules/mailTemplates');
 const { sendSystemMail } = require('./modules/notifications');
 const { formatUser, truncate } = require('./modules/logger');
+const { logToChannel, embeds: logEmbeds, clearCache: clearLogCache } = require('./modules/logChannels');
 
 // Sistem hatalarını yakala ve sadece developer kanalına gönder
 process.on('uncaughtException', (error) => {
@@ -632,6 +633,14 @@ const commands = [
             option.setName('kullanici_id')
                 .setDescription('Belirli kullanıcı ID (opsiyonel)')
                 .setRequired(false))
+    new SlashCommandBuilder()
+        .setName('dev-setup-logs')
+        .setDescription('Yatırım log kanallarını otomatik oluştur (Sadece Developer)')
+        .addStringOption(option =>
+            option.setName('kategori_id')
+                .setDescription('Log kanallarının açılacağı kategori ID\'si')
+                .setRequired(true)),
+
 ].map(command => command.toJSON());
 
 // Bot presence güncelleme fonksiyonu
@@ -1204,6 +1213,14 @@ client.on('interactionCreate', async (interaction) => {
                     }
 
                     // Embed'i güncelle
+                    // Log: onay
+                    logToChannel(client, 'basvuru_onay', logEmbeds.onay({
+                        type: 'Yüksek Ekonomi',
+                        guildId: application.guild_id,
+                        reviewerId: interaction.user.id,
+                        detail: `Başlangıç paketi: ${starterPackage.toLocaleString('tr-TR')} Papel`,
+                    }));
+
                     await interaction.editReply({
                         embeds: [{
                             title: '✅ Yüksek Ekonomi Onaylandı',
@@ -1228,6 +1245,13 @@ client.on('interactionCreate', async (interaction) => {
                             reviewed_at: new Date().toISOString(),
                         })
                         .eq('id', applicationId);
+
+                    // Log: ret
+                    logToChannel(client, 'basvuru_red', logEmbeds.red({
+                        type: 'Yüksek Ekonomi',
+                        guildId: application.guild_id,
+                        reviewerId: interaction.user.id,
+                    }));
 
                     await interaction.editReply({
                         embeds: [{
@@ -1352,6 +1376,14 @@ client.on('interactionCreate', async (interaction) => {
                         console.error('IPO notify failed:', notifyErr);
                     }
 
+                    // Log: IPO onay
+                    logToChannel(client, 'basvuru_onay', logEmbeds.onay({
+                        type: 'IPO',
+                        guildId: ipoApp.guild_id,
+                        reviewerId: interaction.user.id,
+                        detail: `Fiyat: ${ipoApp.proposed_price.toLocaleString()} Papel/lot · Founder: %${Math.round(ipoApp.proposed_founder_ratio * 100)}`,
+                    }));
+
                     await interaction.editReply({
                         embeds: [{
                             title: '✅ IPO Onaylandı',
@@ -1376,6 +1408,13 @@ client.on('interactionCreate', async (interaction) => {
                             reviewed_at: new Date().toISOString(),
                         })
                         .eq('id', applicationId);
+
+                    // Log: IPO ret
+                    logToChannel(client, 'basvuru_red', logEmbeds.red({
+                        type: 'IPO',
+                        guildId: ipoApp.guild_id,
+                        reviewerId: interaction.user.id,
+                    }));
 
                     await interaction.editReply({
                         embeds: [{
@@ -1421,6 +1460,94 @@ client.on('interactionCreate', async (interaction) => {
             case 'setup':
                 await interaction.editReply({ content: '❌ `/setup` komutu kaldırıldı — lütfen kurulum için web panelini kullanın.' });
                 break;
+
+            case 'dev-setup-logs': {
+                const DEVELOPER_ID = process.env.DEVELOPER_DISCORD_USER_ID;
+                if (!DEVELOPER_ID || interaction.user.id !== DEVELOPER_ID) {
+                    await interaction.editReply({ content: '❌ Bu komut yalnızca developer tarafından kullanılabilir.' });
+                    return;
+                }
+
+                const categoryId = interaction.options.getString('kategori_id');
+
+                const LOG_CHANNELS = [
+                    // Başvurular
+                    { key: 'basvuru_ekonomi',   name: 'basvuru-ekonomi',       topic: 'Yüksek Ekonomi başvuruları — onay/ret butonları' },
+                    { key: 'basvuru_ipo',        name: 'basvuru-ipo',           topic: 'IPO başvuruları — onay/ret butonları' },
+                    { key: 'basvuru_onay',       name: 'basvuru-onay',          topic: 'Onaylanan tüm başvurular (ekonomi + IPO)' },
+                    { key: 'basvuru_red',        name: 'basvuru-red',           topic: 'Reddedilen tüm başvurular + gerekçe' },
+                    // Borsa işlemleri
+                    { key: 'borsa_trades',       name: 'borsa-islemler',        topic: 'Gerçekleşen alım-satım trade\'leri' },
+                    { key: 'borsa_emirler',      name: 'borsa-emirler',         topic: 'Açılan / iptal edilen / süresi dolan emirler' },
+                    { key: 'circuit_breaker',    name: 'circuit-breaker',       topic: 'Circuit breaker tetiklendi / kalktı' },
+                    { key: 'buyuk_islemler',     name: 'buyuk-islemler',        topic: 'Büyük hacimli işlemler (eşik üzeri)' },
+                    { key: 'suphe_log',          name: 'suphe-log',             topic: 'Wash trading girişimleri ve şüpheli aktiviteler' },
+                    // Hazine & Ekonomi
+                    { key: 'hazine_giris',       name: 'hazine-giris',          topic: 'Satın alımdan gelen burn + treasury kesintileri' },
+                    { key: 'hazine_cikis',       name: 'hazine-cikis',          topic: 'Referral, temettü, delist tasfiyesi ödemeleri' },
+                    { key: 'temetu_haftalik',    name: 'temetu-haftalik',       topic: 'Haftalık cron temettü dağıtımı özeti' },
+                    { key: 'halving_log',        name: 'halving-log',           topic: 'Earn multiplier ve halving değişimleri' },
+                    // Referral
+                    { key: 'referral_aktivasyon', name: 'referral-aktivasyon', topic: 'Referral kodu kullanıldı / aktive oldu' },
+                    { key: 'referral_odeme',     name: 'referral-odeme',        topic: 'Haftalık pasif gelir ödemeleri / pending' },
+                    // Yönetim
+                    { key: 'ceza_log',           name: 'ceza-log',              topic: 'Ceza verildi / kaldırıldı / delist kararları' },
+                    { key: 'piyasa_olaylari',    name: 'piyasa-olaylari',       topic: 'Market event oluşturuldu / kapandı' },
+                    { key: 'freeze_log',         name: 'freeze-log',            topic: 'Global freeze açıldı / kapandı' },
+                    // Sistem
+                    { key: 'cron_sonuclar',      name: 'cron-sonuclar',         topic: 'Haftalık cron job özetleri' },
+                    { key: 'sistem_hatalar',     name: 'sistem-hatalar',        topic: 'API hataları ve kritik exception\'lar' },
+                ];
+
+                await interaction.editReply({ content: `⏳ ${LOG_CHANNELS.length} kanal oluşturuluyor...` });
+
+                const createdChannels = [];
+                const failedChannels = [];
+
+                for (const ch of LOG_CHANNELS) {
+                    try {
+                        const created = await interaction.guild.channels.create({
+                            name: ch.name,
+                            type: 0, // GUILD_TEXT
+                            parent: categoryId,
+                            topic: ch.topic,
+                            permissionOverwrites: [
+                                {
+                                    id: interaction.guild.roles.everyone.id,
+                                    deny: ['SendMessages', 'AddReactions', 'CreatePublicThreads'],
+                                    allow: ['ViewChannel', 'ReadMessageHistory'],
+                                },
+                            ],
+                        });
+                        createdChannels.push({ key: ch.key, name: ch.name, id: created.id });
+
+                        // app_config'e kaydet
+                        await supabase.from('app_config').upsert(
+                            { key: `log_channel_${ch.key}`, value: created.id },
+                            { onConflict: 'key' }
+                        );
+                    } catch (err) {
+                        console.error(`Kanal oluşturma hatası (${ch.name}):`, err);
+                        failedChannels.push(ch.name);
+                    }
+                }
+
+                const lines = createdChannels.map(c => `<#${c.id}> \`${c.key}\``);
+                const embed = {
+                    title: '✅ Log Kanalları Oluşturuldu',
+                    description: lines.join('\n'),
+                    color: 0x57F287,
+                    fields: failedChannels.length > 0
+                        ? [{ name: '❌ Başarısız', value: failedChannels.join(', ') }]
+                        : [{ name: 'Durum', value: 'Tüm kanallar başarıyla oluşturuldu ve DB\'ye kaydedildi.' }],
+                    footer: { text: `Kategori: ${categoryId}` },
+                    timestamp: new Date().toISOString(),
+                };
+
+                clearLogCache(); // Yeni kanal ID'leri hemen aktif olsun
+                await interaction.editReply({ content: '', embeds: [embed] });
+                return;
+            }
 
             case 'ayarlar':
                 // Ayarlar komutu - mevcut ayarları göster
