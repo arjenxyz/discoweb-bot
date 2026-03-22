@@ -1080,8 +1080,173 @@ client.on('interactionCreate', async (interaction) => {
                 // (Previously there were many `case 'setup_*'` handlers here; they were removed intentionally.)
                 // Any `setup_` button will be short-circuited by the guard above.
 
-
             }
+
+            // ─── Yüksek Ekonomi başvuru onay / ret butonları ───────────────
+            if (customId.startsWith('economy_approve_') || customId.startsWith('economy_reject_')) {
+                const isApprove = customId.startsWith('economy_approve_');
+                const applicationId = isApprove
+                    ? customId.replace('economy_approve_', '')
+                    : customId.replace('economy_reject_', '');
+
+                await interaction.deferUpdate();
+
+                const { supabase } = require('./modules/database');
+
+                // Başvuruyu çek
+                const { data: application } = await supabase
+                    .from('economy_tier_applications')
+                    .select('id, guild_id, applicant_user_id, status, starter_package')
+                    .eq('id', applicationId)
+                    .maybeSingle();
+
+                if (!application || application.status !== 'pending') {
+                    await interaction.editReply({
+                        content: '⚠️ Başvuru bulunamadı veya zaten işlenmiş.',
+                        components: [],
+                    });
+                    return;
+                }
+
+                if (isApprove) {
+                    // 1. Başvuruyu onayla
+                    await supabase
+                        .from('economy_tier_applications')
+                        .update({
+                            status: 'approved',
+                            reviewed_by: interaction.user.id,
+                            reviewed_at: new Date().toISOString(),
+                        })
+                        .eq('id', applicationId);
+
+                    // 2. Sunucuyu advanced yap
+                    await supabase
+                        .from('servers')
+                        .update({
+                            economy_tier: 'advanced',
+                            advanced_since: new Date().toISOString(),
+                        })
+                        .eq('discord_id', application.guild_id);
+
+                    // 3. Tüm üyelerin bakiyelerini sıfırla
+                    await supabase
+                        .from('member_wallets')
+                        .update({ balance: 0, updated_at: new Date().toISOString() })
+                        .eq('guild_id', application.guild_id);
+
+                    // 4. Hazine paketini yükle
+                    const starterPackage = Number(application.starter_package ?? 0);
+                    if (starterPackage > 0) {
+                        const { data: existingTreasury } = await supabase
+                            .from('server_treasury')
+                            .select('balance, total_collected')
+                            .eq('guild_id', application.guild_id)
+                            .maybeSingle();
+
+                        if (existingTreasury) {
+                            await supabase
+                                .from('server_treasury')
+                                .update({
+                                    balance: Number(existingTreasury.balance) + starterPackage,
+                                    total_collected: Number(existingTreasury.total_collected) + starterPackage,
+                                    updated_at: new Date().toISOString(),
+                                })
+                                .eq('guild_id', application.guild_id);
+                        } else {
+                            await supabase
+                                .from('server_treasury')
+                                .insert({
+                                    guild_id: application.guild_id,
+                                    balance: starterPackage,
+                                    total_collected: starterPackage,
+                                    updated_at: new Date().toISOString(),
+                                });
+                        }
+                    }
+
+                    // 5. Sunucuya bildirim gönder (sistem log kanalı)
+                    try {
+                        const { data: logChannelRow } = await supabase
+                            .from('bot_log_channels')
+                            .select('channel_id')
+                            .eq('guild_id', application.guild_id)
+                            .maybeSingle();
+
+                        const notifyChannelId = logChannelRow?.channel_id;
+                        if (notifyChannelId) {
+                            await fetch(`https://discord.com/api/channels/${notifyChannelId}/messages`, {
+                                method: 'POST',
+                                headers: {
+                                    Authorization: `Bot ${process.env.DISCORD_TOKEN}`,
+                                    'Content-Type': 'application/json',
+                                },
+                                body: JSON.stringify({
+                                    embeds: [{
+                                        title: '🔵 Yüksek Ekonomi Aktive Edildi',
+                                        description: [
+                                            'Sunucunuz **Yüksek Ekonomi** kademesine geçirildi.',
+                                            '',
+                                            '> Tüm üyelerin Papel bakiyeleri sıfırlandı.',
+                                            starterPackage > 0
+                                                ? `> Başlangıç hazine paketi yüklendi: **${starterPackage.toLocaleString('tr-TR')} Papel**`
+                                                : '',
+                                            '',
+                                            'Artık her satın alımda belirlenen oranlarda hazineye ve yakma mekanizmasına katkı yapılacak.',
+                                        ].filter(Boolean).join('\n'),
+                                        color: 0x5865F2,
+                                        timestamp: new Date().toISOString(),
+                                    }],
+                                }),
+                            });
+                        }
+                    } catch (notifyErr) {
+                        console.error('Economy tier notify failed:', notifyErr);
+                    }
+
+                    // Embed'i güncelle
+                    await interaction.editReply({
+                        embeds: [{
+                            title: '✅ Yüksek Ekonomi Onaylandı',
+                            description: `Sunucu \`${application.guild_id}\` Yüksek Ekonomi kademesine geçirildi.\nBakiyeler sıfırlandı. Hazine paketi: **${starterPackage.toLocaleString('tr-TR')} Papel**`,
+                            color: 0x57F287,
+                            fields: [
+                                { name: 'Onaylayan', value: `<@${interaction.user.id}>`, inline: true },
+                                { name: 'Tarih', value: new Date().toLocaleDateString('tr-TR'), inline: true },
+                            ],
+                            timestamp: new Date().toISOString(),
+                        }],
+                        components: [],
+                    });
+
+                } else {
+                    // Reddet
+                    await supabase
+                        .from('economy_tier_applications')
+                        .update({
+                            status: 'rejected',
+                            reviewed_by: interaction.user.id,
+                            reviewed_at: new Date().toISOString(),
+                        })
+                        .eq('id', applicationId);
+
+                    await interaction.editReply({
+                        embeds: [{
+                            title: '❌ Yüksek Ekonomi Başvurusu Reddedildi',
+                            description: `Sunucu \`${application.guild_id}\` başvurusu reddedildi.`,
+                            color: 0xED4245,
+                            fields: [
+                                { name: 'Reddeden', value: `<@${interaction.user.id}>`, inline: true },
+                                { name: 'Tarih', value: new Date().toLocaleDateString('tr-TR'), inline: true },
+                            ],
+                            timestamp: new Date().toISOString(),
+                        }],
+                        components: [],
+                    });
+                }
+                return;
+            }
+            // ────────────────────────────────────────────────────────────────
+
         } catch (error) {
             console.error('Button interaction hatası:', error);
             if (!interaction.replied && !interaction.deferred) {
