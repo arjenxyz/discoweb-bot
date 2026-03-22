@@ -2,6 +2,16 @@
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, ButtonBuilder, ActionRowBuilder, ButtonStyle } = require('discord.js');
 const express = require('express');
 const config = require('./modules/config');
+
+if (!config.discordToken) {
+    console.error('⚠️ DISCORD_TOKEN tanımlı değil! Lütfen .env veya .env.local dosyanıza geçerli bir token ekleyin.');
+    process.exit(1);
+}
+
+if (!config.clientId) {
+    console.warn('⚠️ DISCORD_CLIENT_ID tanımlı değil. Slash komut kaydı desteği kısıtlanmış olabilir.');
+}
+
 const { supabase, getGuild, getMaintenanceStatus } = require('./modules/database');
 const { processStoreOrders, processPendingOrdersAtMidnight } = require('./modules/store');
 const { processVoiceEarnings, addDailyEarning, processDailySettlement } = require('./modules/earnings');
@@ -12,15 +22,27 @@ const { sendSystemMail } = require('./modules/notifications');
 const { formatUser, truncate } = require('./modules/logger');
 const { logToChannel, embeds: logEmbeds, clearCache: clearLogCache } = require('./modules/logChannels');
 
+const isClientReady = (botClient) => {
+    return botClient && typeof botClient.isReady === 'function' && botClient.isReady();
+};
+
 // Sistem hatalarını yakala ve sadece developer kanalına gönder
 process.on('uncaughtException', (error) => {
     console.error('Uncaught Exception:', error);
-    logSystemError(client, error, { location: 'uncaughtException' });
+    if (isClientReady(client)) {
+        logSystemError(client, error, { location: 'uncaughtException' });
+    } else {
+        console.warn('Bot henüz hazır değil, sistem hatası Discord kanalına gönderilemedi.');
+    }
 });
 
 process.on('unhandledRejection', (reason, promise) => {
     console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-    logSystemError(client, new Error(String(reason)), { location: 'unhandledRejection' });
+    if (isClientReady(client)) {
+        logSystemError(client, new Error(String(reason)), { location: 'unhandledRejection' });
+    } else {
+        console.warn('Bot henüz hazır değil, unhandledRejection Discord kanalına gönderilemedi.');
+    }
 });
 
 // Extracted reset workflow into a separate module to reduce index.js size and improve testability
@@ -1399,6 +1421,17 @@ client.on('interactionCreate', async (interaction) => {
                         await supabase.from('app_config').upsert(
                             { key: `log_channel_${ch.key}`, value: created.id },
                             { onConflict: 'key' }
+                        );
+
+                        // bot_log_channels'a kaydet (sendLog/logToChannel buraya bakıyor)
+                        await supabase.from('bot_log_channels').upsert(
+                            {
+                                guild_id: interaction.guild.id,
+                                channel_type: ch.key,
+                                channel_id: created.id,
+                                is_active: true,
+                            },
+                            { onConflict: 'guild_id,channel_type' }
                         );
                     } catch (err) {
                         console.error(`Kanal oluşturma hatası (${ch.name}):`, err);
