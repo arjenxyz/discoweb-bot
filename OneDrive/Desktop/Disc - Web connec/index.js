@@ -2071,8 +2071,8 @@ client.on('interactionCreate', async (interaction) => {
         const isSuggestion = customId.startsWith('suggestion_select_');
         if (!isBug && !isSuggestion) return;
 
-        await interaction.deferReply({ ephemeral: true });
         try {
+        await interaction.deferReply({ ephemeral: true });
             const reportId = customId.replace('bugreport_select_', '').replace('suggestion_select_', '');
             const newStatus = interaction.values[0];
 
