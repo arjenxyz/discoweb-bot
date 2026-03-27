@@ -2069,7 +2069,10 @@ client.on('interactionCreate', async (interaction) => {
         const { customId } = interaction;
         const isBug        = customId.startsWith('bugreport_select_');
         const isSuggestion = customId.startsWith('suggestion_select_');
-        if (!isBug && !isSuggestion) return;
+        if (!isBug && !isSuggestion) {
+            try { await interaction.reply({ content: '⚠️ Bu menü artık aktif değil.', ephemeral: true }); } catch { /* ignore */ }
+            return;
+        }
 
         try {
         await interaction.deferReply({ ephemeral: true });
