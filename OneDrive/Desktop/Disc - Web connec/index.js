@@ -2049,104 +2049,6 @@ client.on('interactionCreate', async (interaction) => {
             }
             // ────────────────────────────────────────────────────────────────
 
-            // ─── Hata Bildirimi butonları ────────────────────────────────────
-            if (
-                customId.startsWith('bugreport_review_') ||
-                customId.startsWith('bugreport_resolved_') ||
-                customId.startsWith('bugreport_notfound_')
-            ) {
-                await interaction.deferReply({ ephemeral: true });
-
-                const reportId = customId
-                    .replace('bugreport_review_', '')
-                    .replace('bugreport_resolved_', '')
-                    .replace('bugreport_notfound_', '');
-
-                let newStatus;
-                if (customId.startsWith('bugreport_review_'))    newStatus = 'reviewing';
-                if (customId.startsWith('bugreport_resolved_'))  newStatus = 'resolved';
-                if (customId.startsWith('bugreport_notfound_'))  newStatus = 'not_found';
-
-                const { supabase } = require('./modules/database');
-
-                // Raporu çek
-                const { data: report } = await supabase
-                    .from('bug_reports')
-                    .select('id, user_id, section, description, status, channel_id, message_id')
-                    .eq('id', reportId)
-                    .maybeSingle();
-
-                if (!report) {
-                    await interaction.editReply({ content: '⚠️ Rapor bulunamadı.' });
-                    return;
-                }
-
-                // DB güncelle
-                await supabase
-                    .from('bug_reports')
-                    .update({ status: newStatus, updated_at: new Date().toISOString() })
-                    .eq('id', reportId);
-
-                // Discord embed güncelle
-                const statusEmbed = {
-                    reviewing: {
-                        color: 0xF0A500,
-                        badge: '🔍 İnceleniyor',
-                        footer: `Reviewer: ${interaction.user.tag}`,
-                        components: [
-                            {
-                                type: 1,
-                                components: [
-                                    { type: 2, style: 3, label: '✅ Sorun Çözüldü', custom_id: `bugreport_resolved_${reportId}` },
-                                    { type: 2, style: 4, label: '❓ Tespit Edilemedi', custom_id: `bugreport_notfound_${reportId}` },
-                                ],
-                            },
-                        ],
-                    },
-                    resolved: {
-                        color: 0x57F287,
-                        badge: '✅ Çözüldü',
-                        footer: `Çözen: ${interaction.user.tag}`,
-                        components: [],
-                    },
-                    not_found: {
-                        color: 0xED4245,
-                        badge: '❓ Tespit Edilemedi',
-                        footer: `İnceleyen: ${interaction.user.tag}`,
-                        components: [],
-                    },
-                };
-
-                const cfg = statusEmbed[newStatus];
-                const sectionLabel = report.section ? ` [${report.section}]` : '';
-                const updatedEmbed = {
-                    title: `🐛 Hata Bildirimi${sectionLabel} — ${cfg.badge}`,
-                    color: cfg.color,
-                    description: report.description,
-                    timestamp: new Date().toISOString(),
-                    footer: { text: `DiscoWeb Destek · User: ${report.user_id} · ${cfg.footer}` },
-                };
-
-                const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
-                if (report.message_id && DISCORD_BOT_TOKEN) {
-                    await fetch(
-                        `https://discord.com/api/v10/channels/${report.channel_id}/messages/${report.message_id}`,
-                        {
-                            method: 'PATCH',
-                            headers: {
-                                Authorization: `Bot ${DISCORD_BOT_TOKEN}`,
-                                'Content-Type': 'application/json',
-                            },
-                            body: JSON.stringify({ embeds: [updatedEmbed], components: cfg.components }),
-                        }
-                    );
-                }
-
-                await interaction.editReply({
-                    content: `✅ Rapor durumu **${cfg.badge}** olarak güncellendi.`,
-                });
-                return;
-            }
             // ────────────────────────────────────────────────────────────────
 
         } catch (error) {
@@ -2161,6 +2063,117 @@ client.on('interactionCreate', async (interaction) => {
         }
         return;
     }
+
+    // ─── Destek select menu'leri ─────────────────────────────────────────────
+    if (interaction.isStringSelectMenu()) {
+        const { customId } = interaction;
+        const isBug        = customId.startsWith('bugreport_select_');
+        const isSuggestion = customId.startsWith('suggestion_select_');
+        if (!isBug && !isSuggestion) return;
+
+        await interaction.deferReply({ ephemeral: true });
+        try {
+            const reportId = customId.replace('bugreport_select_', '').replace('suggestion_select_', '');
+            const newStatus = interaction.values[0];
+
+            const { supabase } = require('./modules/database');
+
+            const { data: report } = await supabase
+                .from('bug_reports')
+                .select('id, user_id, type, section, description, channel_id, message_id')
+                .eq('id', reportId)
+                .maybeSingle();
+
+            if (!report) {
+                await interaction.editReply({ content: '⚠️ Rapor bulunamadı.' });
+                return;
+            }
+
+            await supabase
+                .from('bug_reports')
+                .update({ status: newStatus, updated_at: new Date().toISOString() })
+                .eq('id', reportId);
+
+            const STATUS_MAP = {
+                reviewing:     { color: 0xF0A500, badge: '🔍 İnceleniyor' },
+                need_info:     { color: 0x5865F2, badge: '💬 Bilgi Gerekiyor' },
+                critical:      { color: 0xFF0000, badge: '⚠️ Kritik' },
+                fixed_pending: { color: 0x00CED1, badge: '🔧 Deploy Bekleniyor' },
+                resolved:      { color: 0x57F287, badge: isBug ? '✅ Çözüldü' : '✅ Kabul Edildi' },
+                not_found:     { color: 0xED4245, badge: isBug ? '❌ Tespit Edilemedi' : '❌ Reddedildi' },
+                duplicate:     { color: 0x99AAB5, badge: isBug ? '🔁 Bilinen Sorun' : '🔁 Zaten Mevcut' },
+                invalid:       { color: 0x747F8D, badge: isBug ? '🚫 Geçersiz' : '🚫 Kapsam Dışı' },
+                planned_next:  { color: 0x00CED1, badge: '🎯 Sonraki Sürüme Alındı' },
+                long_term:     { color: 0x9B59B6, badge: '⏳ Uzun Vadeli' },
+            };
+
+            const cfg = STATUS_MAP[newStatus] ?? { color: 0x747F8D, badge: newStatus };
+            const sectionLabel = report.section ? ` [${report.section}]` : '';
+            const updatedEmbed = {
+                title: isBug
+                    ? `🐛 Hata Bildirimi${sectionLabel} — ${cfg.badge}`
+                    : `💡 Öneri${sectionLabel} — ${cfg.badge}`,
+                color: cfg.color,
+                description: report.description,
+                timestamp: new Date().toISOString(),
+                footer: { text: `DiscoWeb Destek · User: ${report.user_id} · ${interaction.user.tag}` },
+            };
+
+            const bugOptions = [
+                { label: '🔍 İnceleniyor',          value: 'reviewing',     description: 'Ekip incelemeye aldı' },
+                { label: '💬 Bilgi Gerekiyor',       value: 'need_info',     description: 'Daha fazla bilgi isteniyor' },
+                { label: '⚠️ Kritik',               value: 'critical',      description: 'Öncelikli ele alınacak' },
+                { label: '🔧 Deploy Bekleniyor',     value: 'fixed_pending', description: 'Düzeltildi, yayınlanacak' },
+                { label: '✅ Çözüldü',               value: 'resolved',      description: 'Sorun giderildi' },
+                { label: '❌ Tespit Edilemedi',      value: 'not_found',     description: 'Üretilemedi' },
+                { label: '🔁 Bilinen Sorun',         value: 'duplicate',     description: 'Zaten takip ediliyor' },
+                { label: '🚫 Geçersiz',              value: 'invalid',       description: 'Alakasız veya spam' },
+            ];
+            const suggestionOptions = [
+                { label: '🔍 İnceleniyor',           value: 'reviewing',     description: 'Ekip değerlendiriyor' },
+                { label: '💬 Detay Gerekiyor',       value: 'need_info',     description: 'Daha fazla açıklama isteniyor' },
+                { label: '🎯 Sonraki Sürüme Alındı', value: 'planned_next',  description: 'Yakında eklenecek' },
+                { label: '⏳ Uzun Vadeli',           value: 'long_term',     description: 'Uzun vadede düşünülüyor' },
+                { label: '✅ Kabul Edildi',           value: 'resolved',      description: 'Eklenecek' },
+                { label: '❌ Reddedildi',            value: 'not_found',     description: 'Şimdilik planlanmıyor' },
+                { label: '🔁 Zaten Mevcut',          value: 'duplicate',     description: 'Bu özellik zaten var' },
+                { label: '🚫 Kapsam Dışı',           value: 'invalid',       description: 'Projenin odağıyla uyuşmuyor' },
+            ];
+
+            const DISCORD_BOT_TOKEN = config.discordToken;
+            if (report.message_id && DISCORD_BOT_TOKEN) {
+                await fetch(
+                    `https://discord.com/api/v10/channels/${report.channel_id}/messages/${report.message_id}`,
+                    {
+                        method: 'PATCH',
+                        headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            embeds: [updatedEmbed],
+                            components: [{
+                                type: 1,
+                                components: [{
+                                    type: 3,
+                                    custom_id: customId,
+                                    placeholder: '⚙️ Durumu güncelle...',
+                                    options: isBug ? bugOptions : suggestionOptions,
+                                }],
+                            }],
+                        }),
+                    }
+                );
+            }
+
+            await interaction.editReply({ content: `✅ Durum **${cfg.badge}** olarak güncellendi.` });
+        } catch (err) {
+            console.error('Select menu interaction hatası:', err);
+            try {
+                if (interaction.deferred) await interaction.followUp({ content: '❌ Bir hata oluştu.', ephemeral: true });
+                else if (!interaction.replied) await interaction.reply({ content: '❌ Bir hata oluştu.', ephemeral: true });
+            } catch { /* ignore */ }
+        }
+        return;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     if (!interaction.isChatInputCommand()) return;
 
