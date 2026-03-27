@@ -2055,7 +2055,7 @@ client.on('interactionCreate', async (interaction) => {
                 customId.startsWith('bugreport_resolved_') ||
                 customId.startsWith('bugreport_notfound_')
             ) {
-                await interaction.deferUpdate();
+                await interaction.deferReply({ ephemeral: true });
 
                 const reportId = customId
                     .replace('bugreport_review_', '')
@@ -2077,7 +2077,7 @@ client.on('interactionCreate', async (interaction) => {
                     .maybeSingle();
 
                 if (!report) {
-                    await interaction.followUp({ content: '⚠️ Rapor bulunamadı.', ephemeral: true });
+                    await interaction.editReply({ content: '⚠️ Rapor bulunamadı.' });
                     return;
                 }
 
@@ -2142,9 +2142,8 @@ client.on('interactionCreate', async (interaction) => {
                     );
                 }
 
-                await interaction.followUp({
+                await interaction.editReply({
                     content: `✅ Rapor durumu **${cfg.badge}** olarak güncellendi.`,
-                    ephemeral: true,
                 });
                 return;
             }
@@ -2152,12 +2151,13 @@ client.on('interactionCreate', async (interaction) => {
 
         } catch (error) {
             console.error('Button interaction hatası:', error);
-            if (!interaction.replied && !interaction.deferred) {
-                await interaction.reply({
-                    content: '❌ Buton etkileşimi sırasında bir hata oluştu.',
-                    ephemeral: true
-                });
-            }
+            try {
+                if (interaction.deferred) {
+                    await interaction.followUp({ content: '❌ Bir hata oluştu.', ephemeral: true });
+                } else if (!interaction.replied) {
+                    await interaction.reply({ content: '❌ Bir hata oluştu.', ephemeral: true });
+                }
+            } catch { /* ignore */ }
         }
         return;
     }
