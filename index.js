@@ -2127,7 +2127,7 @@ client.on('interactionCreate', async (interaction) => {
                     footer: { text: `DiscoWeb Destek · User: ${report.user_id} · ${cfg.footer}` },
                 };
 
-                const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+                const DISCORD_BOT_TOKEN = config.discordToken;
                 if (report.message_id && DISCORD_BOT_TOKEN) {
                     await fetch(
                         `https://discord.com/api/v10/channels/${report.channel_id}/messages/${report.message_id}`,
