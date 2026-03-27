@@ -2049,6 +2049,108 @@ client.on('interactionCreate', async (interaction) => {
             }
             // ────────────────────────────────────────────────────────────────
 
+            // ─── Hata Bildirimi butonları ────────────────────────────────────
+            if (
+                customId.startsWith('bugreport_review_') ||
+                customId.startsWith('bugreport_resolved_') ||
+                customId.startsWith('bugreport_notfound_')
+            ) {
+                await interaction.deferUpdate();
+
+                const reportId = customId
+                    .replace('bugreport_review_', '')
+                    .replace('bugreport_resolved_', '')
+                    .replace('bugreport_notfound_', '');
+
+                let newStatus;
+                if (customId.startsWith('bugreport_review_'))    newStatus = 'reviewing';
+                if (customId.startsWith('bugreport_resolved_'))  newStatus = 'resolved';
+                if (customId.startsWith('bugreport_notfound_'))  newStatus = 'not_found';
+
+                const { supabase } = require('./modules/database');
+
+                // Raporu çek
+                const { data: report } = await supabase
+                    .from('bug_reports')
+                    .select('id, user_id, section, description, status, channel_id, message_id')
+                    .eq('id', reportId)
+                    .maybeSingle();
+
+                if (!report) {
+                    await interaction.editReply({ content: '⚠️ Rapor bulunamadı.', components: [] });
+                    return;
+                }
+
+                // DB güncelle
+                await supabase
+                    .from('bug_reports')
+                    .update({ status: newStatus, updated_at: new Date().toISOString() })
+                    .eq('id', reportId);
+
+                // Discord embed güncelle
+                const statusEmbed = {
+                    reviewing: {
+                        color: 0xF0A500,
+                        badge: '🔍 İnceleniyor',
+                        footer: `Reviewer: ${interaction.user.tag}`,
+                        components: [
+                            {
+                                type: 1,
+                                components: [
+                                    { type: 2, style: 3, label: '✅ Sorun Çözüldü', custom_id: `bugreport_resolved_${reportId}` },
+                                    { type: 2, style: 4, label: '❓ Tespit Edilemedi', custom_id: `bugreport_notfound_${reportId}` },
+                                ],
+                            },
+                        ],
+                    },
+                    resolved: {
+                        color: 0x57F287,
+                        badge: '✅ Çözüldü',
+                        footer: `Çözen: ${interaction.user.tag}`,
+                        components: [],
+                    },
+                    not_found: {
+                        color: 0xED4245,
+                        badge: '❓ Tespit Edilemedi',
+                        footer: `İnceleyen: ${interaction.user.tag}`,
+                        components: [],
+                    },
+                };
+
+                const cfg = statusEmbed[newStatus];
+                const sectionLabel = report.section ? ` [${report.section}]` : '';
+                const updatedEmbed = {
+                    title: `🐛 Hata Bildirimi${sectionLabel} — ${cfg.badge}`,
+                    color: cfg.color,
+                    description: report.description,
+                    timestamp: new Date().toISOString(),
+                    footer: { text: `DiscoWeb Destek · User: ${report.user_id} · ${cfg.footer}` },
+                };
+
+                const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+                if (report.message_id && DISCORD_BOT_TOKEN) {
+                    await fetch(
+                        `https://discord.com/api/v10/channels/${report.channel_id}/messages/${report.message_id}`,
+                        {
+                            method: 'PATCH',
+                            headers: {
+                                Authorization: `Bot ${DISCORD_BOT_TOKEN}`,
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({ embeds: [updatedEmbed], components: cfg.components }),
+                        }
+                    );
+                }
+
+                await interaction.editReply({
+                    content: `✅ Rapor durumu **${cfg.badge}** olarak güncellendi.`,
+                    components: [],
+                    embeds: [],
+                });
+                return;
+            }
+            // ────────────────────────────────────────────────────────────────
+
         } catch (error) {
             console.error('Button interaction hatası:', error);
             if (!interaction.replied && !interaction.deferred) {
