@@ -2077,7 +2077,7 @@ client.on('interactionCreate', async (interaction) => {
                     .maybeSingle();
 
                 if (!report) {
-                    await interaction.editReply({ content: '⚠️ Rapor bulunamadı.', components: [] });
+                    await interaction.followUp({ content: '⚠️ Rapor bulunamadı.', ephemeral: true });
                     return;
                 }
 
@@ -2142,10 +2142,9 @@ client.on('interactionCreate', async (interaction) => {
                     );
                 }
 
-                await interaction.editReply({
+                await interaction.followUp({
                     content: `✅ Rapor durumu **${cfg.badge}** olarak güncellendi.`,
-                    components: [],
-                    embeds: [],
+                    ephemeral: true,
                 });
                 return;
             }
