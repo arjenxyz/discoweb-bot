@@ -569,7 +569,7 @@ async function updateBotPresence(client) {
             activityName = maintenanceStatus.reason || 'Web hizmeti bakımda';
             status = 'dnd'; // Do Not Disturb
         } else {
-            activityName = 'Akıllı Mağaza Sistemi | v.1.0';
+            activityName = 'DiscoWeb | v.2.03';
             status = 'online';
         }
 
