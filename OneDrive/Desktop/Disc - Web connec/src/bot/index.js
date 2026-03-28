@@ -15,6 +15,7 @@ if (!config.clientId) {
 const { supabase, getGuild, getMaintenanceStatus } = require('./modules/database');
 const { processStoreOrders, processPendingOrdersAtMidnight } = require('./modules/store');
 const { processVoiceEarnings, addDailyEarning, processDailySettlement } = require('./modules/earnings');
+const { handleMessage } = require('./modules/commands/index');
 const { logSystemError } = require('./modules/errorHandler');
 const permissionCache = require('./modules/permissionCache');
 const mailTemplates = require('./modules/mailTemplates');
@@ -719,6 +720,9 @@ client.once('ready', async () => {
 
 // Mesaj Geldiğinde (Prefix komutları için)
 client.on('messageCreate', async (message) => {
+    // Mesaj kazancı işle (bot mesajlarını handleMessage içinde filtreler)
+    handleMessage(message, config, addDailyEarning).catch(err => console.error('[messageCreate] handleMessage error:', err));
+
     // Bot etiketlendiğinde bilgilendirici embed gönder
     if (message.mentions.has(client.user) && !message.author.bot && !message.mentions.everyone) {
         try {
