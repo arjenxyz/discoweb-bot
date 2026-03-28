@@ -643,7 +643,7 @@ async function addMessageEarning(message) {
         const { data: serverCfg } = await supabase
             .from('servers')
             .select('id,discord_id,verify_role_id,message_earn_enabled,earn_per_message,tag_id,tag_bonus_message,booster_bonus_message')
-            .or(`discord_id.eq.${guildId},id.eq.${guildId}`)
+            .eq('discord_id', guildId)
             .maybeSingle();
 
         if (!serverCfg) {
