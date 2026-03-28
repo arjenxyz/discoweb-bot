@@ -818,6 +818,42 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
             } else {
                 const body = mailTemplates.renderTagLost(newMember.user.username);
                 await sendSystemMail({ guildId, userId, title: 'Sancak Düştü!', bodyHtml: body });
+
+                // Revoke all badge tier roles when tag is removed
+                try {
+                    const botToken = process.env.DISCORD_BOT_TOKEN;
+                    if (botToken) {
+                        // Get all rewarded badge tiers that have a role_id for this user/guild
+                        const { data: rewards } = await supabase
+                            .from('member_badge_rewards')
+                            .select('badge_tier_id')
+                            .eq('guild_id', guildId)
+                            .eq('user_id', userId);
+                        if (rewards && rewards.length > 0) {
+                            const tierIds = rewards.map(r => r.badge_tier_id);
+                            const { data: tiers } = await supabase
+                                .from('badge_tiers')
+                                .select('id,role_id')
+                                .in('id', tierIds)
+                                .not('role_id', 'is', null);
+                            for (const tier of tiers ?? []) {
+                                if (!tier.role_id) continue;
+                                await fetch(
+                                    `https://discord.com/api/guilds/${guildId}/members/${userId}/roles/${tier.role_id}`,
+                                    { method: 'DELETE', headers: { Authorization: `Bot ${botToken}` } }
+                                ).catch(() => {});
+                            }
+                        }
+                        // Also clear current_badge_tier_id and reset tag tracking in DB
+                        await supabase
+                            .from('member_profiles')
+                            .update({ has_tag: false, tag_granted_at: null, current_badge_tier_id: null })
+                            .eq('guild_id', guildId)
+                            .eq('user_id', userId);
+                    }
+                } catch (e) {
+                    console.warn('Badge role revoke on tag loss failed', e);
+                }
             }
         }
 
