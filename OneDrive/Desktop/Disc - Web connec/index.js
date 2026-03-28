@@ -706,28 +706,24 @@ async function addMessageEarning(message) {
         if (hasTag) bonus += tagBonusMessage;
         if (isBooster) bonus += boosterBonusMessage;
 
-        // Badge earn multiplier
+        // Badge earn multiplier + active raffle multiplier (stack multiplicatively)
         let badgeMultiplier = 1.0;
+        let raffleMultiplier = 1.0;
         try {
-            const { data: profile } = await supabase
-                .from('member_profiles')
-                .select('current_badge_tier_id')
-                .eq('guild_id', guildId)
-                .eq('user_id', userId)
-                .maybeSingle();
-            if (profile?.current_badge_tier_id) {
-                const { data: tier } = await supabase
-                    .from('badge_tiers')
-                    .select('reward_earn_multiplier')
-                    .eq('id', profile.current_badge_tier_id)
-                    .maybeSingle();
-                if (tier?.reward_earn_multiplier && Number(tier.reward_earn_multiplier) > 1) {
-                    badgeMultiplier = Number(tier.reward_earn_multiplier);
-                }
+            const [profileRes, activeMultRes] = await Promise.all([
+                supabase.from('member_profiles').select('current_badge_tier_id').eq('guild_id', guildId).eq('user_id', userId).maybeSingle(),
+                supabase.from('member_active_multipliers').select('multiplier_value').eq('guild_id', guildId).eq('user_id', userId).gt('expires_at', new Date().toISOString()),
+            ]);
+            if (profileRes.data?.current_badge_tier_id) {
+                const { data: tier } = await supabase.from('badge_tiers').select('reward_earn_multiplier').eq('id', profileRes.data.current_badge_tier_id).maybeSingle();
+                if (tier?.reward_earn_multiplier && Number(tier.reward_earn_multiplier) > 1) badgeMultiplier = Number(tier.reward_earn_multiplier);
             }
-        } catch (_e) { /* ignore — badge multiplier is optional */ }
+            for (const row of activeMultRes.data ?? []) {
+                if (Number(row.multiplier_value) > 1) raffleMultiplier = Math.max(raffleMultiplier, Number(row.multiplier_value));
+            }
+        } catch (_e) { /* ignore — multipliers are optional */ }
 
-        const totalAmount = Number(((perMessage + bonus) * badgeMultiplier).toFixed(2));
+        const totalAmount = Number(((perMessage + bonus) * badgeMultiplier * raffleMultiplier).toFixed(2));
         if (totalAmount <= 0) return;
 
         // Kazancı ekle
