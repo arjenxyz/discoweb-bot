@@ -706,7 +706,28 @@ async function addMessageEarning(message) {
         if (hasTag) bonus += tagBonusMessage;
         if (isBooster) bonus += boosterBonusMessage;
 
-        const totalAmount = Number((perMessage + bonus).toFixed(2));
+        // Badge earn multiplier
+        let badgeMultiplier = 1.0;
+        try {
+            const { data: profile } = await supabase
+                .from('member_profiles')
+                .select('current_badge_tier_id')
+                .eq('guild_id', guildId)
+                .eq('user_id', userId)
+                .maybeSingle();
+            if (profile?.current_badge_tier_id) {
+                const { data: tier } = await supabase
+                    .from('badge_tiers')
+                    .select('reward_earn_multiplier')
+                    .eq('id', profile.current_badge_tier_id)
+                    .maybeSingle();
+                if (tier?.reward_earn_multiplier && Number(tier.reward_earn_multiplier) > 1) {
+                    badgeMultiplier = Number(tier.reward_earn_multiplier);
+                }
+            }
+        } catch (_e) { /* ignore — badge multiplier is optional */ }
+
+        const totalAmount = Number(((perMessage + bonus) * badgeMultiplier).toFixed(2));
         if (totalAmount <= 0) return;
 
         // Kazancı ekle
@@ -715,6 +736,7 @@ async function addMessageEarning(message) {
             channelId: message.channelId,
             base: perMessage,
             bonus,
+            badgeMultiplier,
             hasTag,
             isBooster
         });
