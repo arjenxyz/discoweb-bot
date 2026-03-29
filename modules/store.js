@@ -1,7 +1,7 @@
 // modules/store.js
 const { supabase, getGuild, getLocalDateStartIso } = require('./database');
 const { handleError, ERROR_CATEGORIES } = require('./errorHandler');
-const { EmbedBuilder, Routes } = require('discord.js');
+const { EmbedBuilder } = require('discord.js');
 
 // Render an HTML delivery-failure notification using inline CSS (Foxord-styled)
 function renderDeliveryFailureHtml(orderId, failureCode = null) {
@@ -64,23 +64,6 @@ function renderDeliveryFailureHtml(orderId, failureCode = null) {
         </div>
     </div>
 </body></html>`;
-}
-
-async function revokeRoleViaApi(client, guildId, userId, roleId) {
-    if (!client?.rest) return false;
-    try {
-        await client.rest.delete(Routes.guildMemberRole(guildId, userId, roleId));
-        return true;
-    } catch (err) {
-        if (err?.status === 404) return true;
-        console.warn('Discord REST role revoke failed', {
-            guildId,
-            userId,
-            roleId,
-            error: err
-        });
-        return false;
-    }
 }
 
 let orderWorkerRunning = false;
@@ -410,48 +393,22 @@ const processStoreOrders = async (client, guildId) => {
                         .limit(1);
 
                     if (!stillActive?.length) {
-                        let removed = false;
-                        const member = await guild.members.fetch(order.user_id).catch((err) => {
-                            console.warn('Expired store order member fetch failed', {
-                                orderId: order.id,
-                                userId: order.user_id,
-                                guildId,
-                                error: err
+                        const member = await guild.members.fetch(order.user_id).catch(() => null);
+                        if (member?.roles.cache.has(order.role_id)) {
+                            const result = await member.roles.remove(order.role_id).catch((err) => {
+                                return handleError({
+                                    error: err,
+                                    context: { orderId: order.id, userId: order.user_id, roleId: order.role_id },
+                                    category: ERROR_CATEGORIES.PERMISSION.ROLE_REMOVAL_FAILED,
+                                    orderId: order.id,
+                                    retryCount: order.retry_count || 0
+                                });
                             });
-                            return null;
-                        });
 
-                        if (member) {
-                            if (member.roles.cache.has(order.role_id)) {
-                                try {
-                                    await member.roles.remove(order.role_id);
-                                    removed = true;
-                                } catch (err) {
-                                    console.warn('Failed to remove expired store role via member.roles.remove', {
-                                        orderId: order.id,
-                                        userId: order.user_id,
-                                        roleId: order.role_id,
-                                        guildId,
-                                        error: err
-                                    });
-                                }
-                            } else {
-                                removed = true;
+                            if (!result) {
+                                // handleError zaten durumu işledi
+                                continue;
                             }
-                        }
-
-                        if (!removed) {
-                            removed = await revokeRoleViaApi(client, guildId, order.user_id, order.role_id);
-                        }
-
-                        if (!removed) {
-                            console.warn('Expired role still present, will retry next interval', {
-                                orderId: order.id,
-                                userId: order.user_id,
-                                roleId: order.role_id,
-                                guildId
-                            });
-                            continue;
                         }
                     }
 

@@ -15,32 +15,13 @@ if (!config.clientId) {
 const { supabase, getGuild, getMaintenanceStatus } = require('./modules/database');
 const { processStoreOrders, processPendingOrdersAtMidnight } = require('./modules/store');
 const { processVoiceEarnings, addDailyEarning, processDailySettlement } = require('./modules/earnings');
+const { handleMessage } = require('./modules/commands/index');
 const { logSystemError } = require('./modules/errorHandler');
 const permissionCache = require('./modules/permissionCache');
 const mailTemplates = require('./modules/mailTemplates');
 const { sendSystemMail } = require('./modules/notifications');
 const { formatUser, truncate } = require('./modules/logger');
 const { logToChannel, embeds: logEmbeds, clearCache: clearLogCache } = require('./modules/logChannels');
-
-// ── Market Event helper ──────────────────────────────────────────────────────
-const ANON_ACTORS = ['Gizemli bir yatırımcı', 'Büyük bir aktör', 'Piyasanın demir eli', 'Stratejik bir isim', 'Cesur bir hamle yapan yatırımcı'];
-const TEMPLATES = {
-    ipo_launch:       [(m) => `🔔 Yeni halka arz: ${m.server_name} bugün borsaya açıldı — ${m.price?.toFixed(2)} MRI/lot`, (m) => `${m.server_name} yatırımcılarla buluşuyor! IPO fiyatı: ${m.price?.toFixed(2)} MRI`],
-    treasury_support: [(m) => `🏦 ${m.server_name} hazinesi devreye girdi — ${m.lot_count?.toLocaleString()} lot alındı, fiyat desteklendi`, (m) => `${m.server_name} hazinesi ${m.lot_count?.toLocaleString()} lot alarak piyasaya güven verdi`],
-    delist_warning:   [(m) => `⚠️ ${m.server_name} tehlike bölgesinde — fiyat eşik altında`, (m) => `Alarm: ${m.server_name} delist sınırına yaklaştı`],
-    delist:           [(m) => `🔴 ${m.server_name} borsadan çıkarıldı — tüm yatırımcılara tazminat ödendi`],
-    dividend_paid:    [(m) => `💰 Haftalık temettü dağıtıldı — ${m.server_name} lot sahipleri toplam ${m.mari?.toFixed(2)} MRI kazandı`, (m) => `${m.server_name} yatırımcıları bu hafta da kazandı: ${m.mari?.toFixed(2)} MRI temettü`],
-    price_crash:      [(m) => `📉 ${m.server_name}'da sert satış: ${m.pct?.toFixed(1)}% günlük düşüş`],
-    market_recovery:  [(m) => `💹 ${m.server_name} dipten döndü — ${m.pct?.toFixed(1)}% toparlanma kaydedildi`],
-};
-async function insertMarketEvent(eventType, guildId, actorId, meta, body) {
-    try {
-        const templates = TEMPLATES[eventType];
-        const headline = templates ? templates[Math.floor(Math.random() * templates.length)](meta || {}) : eventType;
-        await supabase.from('market_events').insert({ event_type: eventType, guild_id: guildId || null, actor_id: actorId || null, headline, body: body || null, metadata: meta || null });
-    } catch (e) { /* sessizce geç */ }
-}
-// ── Market Event helper sonu ─────────────────────────────────────────────────
 
 const isClientReady = (botClient) => {
     return botClient && typeof botClient.isReady === 'function' && botClient.isReady();
@@ -556,8 +537,17 @@ async function updateProgressEmbed(interaction, message, step) {
     await interaction.editReply({ embeds: [embed] });
 }
 
-// Slash komutları — boş (tüm komutlar kaldırıldı)
-const commands = [].map(command => command.toJSON());
+// Slash komutları — sadece developer komutu
+const commands = [
+    new SlashCommandBuilder()
+        .setName('dev-setup-logs')
+        .setDescription('Yatırım log kanallarını otomatik oluştur (Sadece Developer)')
+        .addStringOption(option =>
+            option.setName('kategori_id')
+                .setDescription('Log kanallarının açılacağı kategori ID\'si')
+                .setRequired(true)),
+
+].map(command => command.toJSON());
 
 // Bot presence güncelleme fonksiyonu
 async function updateBotPresence(client) {
@@ -617,123 +607,26 @@ startBotApi({ supabase, client, port: process.env.BOT_API_PORT || 3000 });
 
 const voiceAward = require('./modules/voiceAward');
 
-// Mesaj kazancı için cooldown takibi (spam koruması)
-const messageCooldowns = new Map();
-const MESSAGE_COOLDOWN_MS = 3000; // 3 saniye cooldown
 
-// Mesaj kazancı ekle
-async function addMessageEarning(message) {
-    try {
-        if (!message.guild) return; // DM mesajları sayılmaz
-        if (message.author.bot) return; // Bot mesajları sayılmaz
-
-        const guildId = message.guild.id;
-        const userId = message.author.id;
-        const key = `${guildId}:${userId}`;
-
-        // Cooldown kontrolü (spam koruması)
-        const now = Date.now();
-        const lastMessage = messageCooldowns.get(key);
-        if (lastMessage && (now - lastMessage) < MESSAGE_COOLDOWN_MS) {
-            return; // Cooldown aktif, kazanç ekleme
-        }
-        messageCooldowns.set(key, now);
-
-        // Sunucu ayarlarını çek
-        const { data: serverCfg } = await supabase
-            .from('servers')
-            .select('id,discord_id,verify_role_id,message_earn_enabled,earn_per_message,tag_id,tag_bonus_message,booster_bonus_message')
-            .or(`discord_id.eq.${guildId},id.eq.${guildId}`)
-            .maybeSingle();
-
-        if (!serverCfg) {
-            console.log(`[messageEarning] Server config not found for guild:${guildId}`);
-            return;
-        }
-
-        const cfgVerifyRole = serverCfg?.verify_role_id ?? null;
-        const messageEnabled = serverCfg?.message_earn_enabled ?? true;
-        const perMessage = Number(serverCfg?.earn_per_message ?? process.env.PAPEL_PER_MESSAGE ?? 1);
-        const tagId = serverCfg?.tag_id ?? null;
-        const tagBonusMessage = Number(serverCfg?.tag_bonus_message ?? 0) || 0;
-        const boosterBonusMessage = Number(serverCfg?.booster_bonus_message ?? 0) || 0;
-
-        // Verify rolü ayarlanmamışsa veya mesaj kazancı devre dışıysa
-        if (!cfgVerifyRole) {
-            console.log(`[messageEarning] SKIP no verify role configured guild:${guildId}`);
-            return;
-        }
-        if (!messageEnabled) {
-            console.log(`[messageEarning] SKIP message earning disabled guild:${guildId}`);
-            return;
-        }
-
-        // Kullanıcının verify rolü var mı kontrol et
-        const member = await message.guild.members.fetch(userId).catch(() => null);
-        if (!member) return;
-
-        const isApproved = Boolean(member.roles.cache.has(cfgVerifyRole));
-        if (!isApproved) {
-            console.log(`[messageEarning] SKIP user not verified guild:${guildId} user:${userId}`);
-            return;
-        }
-
-        // Tag ve booster bonuslarını hesapla
-        let hasTag = false;
-        let isBooster = false;
-        try {
-            const entry = await permissionCache.get(client, guildId, userId);
-            if (entry) {
-                hasTag = Boolean(entry.hasTag);
-                isBooster = Boolean(entry.isBooster);
-            } else {
-                const { getMemberServerTagId, getMemberPrimaryGuildId } = require('./memberTag');
-                const memberTagId = getMemberServerTagId(member);
-                const memberPrimaryGuildId = getMemberPrimaryGuildId(member);
-                hasTag = Boolean(tagId && (String(memberPrimaryGuildId) === String(tagId) || String(memberTagId) === String(tagId)));
-                isBooster = Boolean(member.premiumSinceTimestamp || member.premiumSince);
-                permissionCache.updateForMember(client, guildId, member).catch(() => null);
-            }
-        } catch (e) {
-            const { getMemberServerTagId, getMemberPrimaryGuildId } = require('./memberTag');
-            const memberTagId = getMemberServerTagId(member);
-            const memberPrimaryGuildId = getMemberPrimaryGuildId(member);
-            hasTag = Boolean(tagId && (String(memberPrimaryGuildId) === String(tagId) || String(memberTagId) === String(tagId)));
-            isBooster = Boolean(member.premiumSinceTimestamp || member.premiumSince);
-        }
-
-        let bonus = 0;
-        if (hasTag) bonus += tagBonusMessage;
-        if (isBooster) bonus += boosterBonusMessage;
-
-        const totalAmount = Number((perMessage + bonus).toFixed(2));
-        if (totalAmount <= 0) return;
-
-        // Kazancı ekle
-        const { addBalance, upsertMemberDailyStats } = require('./modules/earnings');
-        await addBalance(guildId, userId, totalAmount, 'earn_message', {
-            channelId: message.channelId,
-            base: perMessage,
-            bonus,
-            hasTag,
-            isBooster
-        });
-
-        // Günlük istatistikleri güncelle
-        const today = new Date().toISOString().slice(0, 10);
-        await upsertMemberDailyStats(guildId, userId, today, 1, 0);
-
-        console.log(`[messageEarning] AWARDED guild:${guildId} user:${userId} amount:${totalAmount} base:${perMessage} bonus:${bonus} hasTag:${hasTag} isBooster:${isBooster}`);
-
-    } catch (error) {
-        console.error('[messageEarning] Error:', error);
-    }
-}
-
-// Slash komutlarını kaydetme fonksiyonu (kaldırıldı)
+// Slash komutlarını kaydetme fonksiyonu
 const registerSlashCommands = async (guildId = null) => {
-    // Slash komutlar kaldırıldı
-    return;
+    try {
+        const rest = new REST({ version: '10' }).setToken(config.discordToken);
+
+        // Eğer guildId belirtilmemişse, config'deki guild'i kullan
+        const targetGuildId = guildId || config.guildId;
+
+        console.log(`🔄 Slash komutları ${guildId ? 'yeni sunucu için' : 'ana sunucu için'} kaydediliyor...`);
+
+        await rest.put(
+            Routes.applicationGuildCommands(config.clientId, targetGuildId),
+            { body: commands }
+        );
+
+        console.log(`✅ Slash komutları ${guildId ? 'yeni sunucuya' : 'ana sunucuya'} başarıyla kaydedildi!`);
+    } catch (error) {
+        console.error('❌ Slash komutları kaydedilirken hata:', error);
+    }
 };
 
 // Bot Hazır Olduğunda
@@ -745,7 +638,21 @@ client.once('ready', async () => {
     console.log(`🎯 Rol kontrolü: ${config.requiredRoleId}`);
     console.log('------------------------------------');
 
-    // Slash komutlar kaldırıldı
+    // Tüm sunuculara slash komutlarını kaydet
+    console.log('🔄 Tüm sunuculara slash komutları kaydediliyor...');
+    const registerPromises = [];
+    
+    client.guilds.cache.forEach(async (guild) => {
+        console.log(`📝 ${guild.name} (${guild.id}) sunucusuna komutlar kaydediliyor...`);
+        registerPromises.push(registerSlashCommands(guild.id));
+    });
+    
+    try {
+        await Promise.all(registerPromises);
+        console.log('✅ Tüm sunuculara slash komutları başarıyla kaydedildi!');
+    } catch (error) {
+        console.error('❌ Bazı sunuculara slash komutları kaydedilirken hata:', error);
+    }
 
     client.guilds.fetch(config.guildId)
         .then((guild) => {
@@ -809,636 +716,14 @@ client.once('ready', async () => {
             void processDailySettlement(guild.id);
         });
     }, 60000);
-
-    // ── IPO Otomatik Onay ────────────────────────────────────────────────────
-    let ipoAutoApproveCheckedDate = null; // günde bir kez çalışır
-
-    setInterval(async () => {
-        const now = new Date();
-        const todayStr = now.toISOString().slice(0, 10);
-        const currentHour = now.getHours();
-
-        // Gece 01:00'de çalış (00:00 yoğun, biraz kaydır)
-        if (currentHour !== 1 || ipoAutoApproveCheckedDate === todayStr) return;
-        ipoAutoApproveCheckedDate = todayStr;
-
-        try {
-            // auto_approve_at <= bugün olan pending başvuruları çek
-            const { data: apps, error } = await supabase
-                .from('ipo_applications')
-                .select('id, guild_id, applicant_user_id, proposed_price, proposed_founder_ratio, guild_stats_snapshot, estimated_date')
-                .eq('status', 'pending')
-                .lte('auto_approve_at', todayStr)
-                .not('auto_approve_at', 'is', null);
-
-            if (error || !apps || apps.length === 0) return;
-
-            console.log(`[IPO AutoApprove] ${apps.length} başvuru otomatik onaylanıyor...`);
-
-            for (const ipoApp of apps) {
-                try {
-                    const founderLots = Math.round(1_000_000 * ipoApp.proposed_founder_ratio);
-                    const publicLots = 1_000_000 - founderLots;
-
-                    // 1. Başvuruyu onayla
-                    await supabase
-                        .from('ipo_applications')
-                        .update({
-                            status: 'approved',
-                            reviewer_user_id: null, // otomatik onay
-                            reviewed_at: new Date().toISOString(),
-                        })
-                        .eq('id', ipoApp.id);
-
-                    // 2. server_listings kaydı oluştur
-                    await supabase
-                        .from('server_listings')
-                        .insert({
-                            guild_id: ipoApp.guild_id,
-                            status: 'approved',
-                            total_lots: 1_000_000,
-                            founder_lots: founderLots,
-                            public_lots: publicLots,
-                            founder_user_id: ipoApp.applicant_user_id,
-                            founder_vesting_start: new Date().toISOString(),
-                            founder_vested_lots: 0,
-                            base_price: ipoApp.proposed_price,
-                            market_price: ipoApp.proposed_price,
-                            ipo_price: ipoApp.proposed_price,
-                            listed_at: new Date().toISOString(),
-                        });
-
-                    // 3. Founder'a lotlarını ver
-                    await supabase
-                        .from('investor_holdings')
-                        .upsert({
-                            user_id: ipoApp.applicant_user_id,
-                            guild_id: ipoApp.guild_id,
-                            lot_count: founderLots,
-                            avg_buy_price: ipoApp.proposed_price,
-                            updated_at: new Date().toISOString(),
-                        }, { onConflict: 'user_id,guild_id' });
-
-                    // 4. Sunucuya bildirim gönder
-                    const { data: logChannelRow } = await supabase
-                        .from('bot_log_channels')
-                        .select('channel_id')
-                        .eq('guild_id', ipoApp.guild_id)
-                        .maybeSingle();
-
-                    if (logChannelRow?.channel_id) {
-                        const serverName = ipoApp.guild_stats_snapshot?.server_name ?? ipoApp.guild_id;
-                        await fetch(`https://discord.com/api/channels/${logChannelRow.channel_id}/messages`, {
-                            method: 'POST',
-                            headers: {
-                                Authorization: `Bot ${process.env.DISCORD_TOKEN}`,
-                                'Content-Type': 'application/json',
-                            },
-                            body: JSON.stringify({
-                                embeds: [{
-                                    title: '📈 IPO Otomatik Onaylandı — Borsaya Hoş Geldiniz!',
-                                    description: [
-                                        `**${serverName}** artık yatırım borsasında listelendi!`,
-                                        '',
-                                        `> Başlangıç fiyatı: **${ipoApp.proposed_price.toLocaleString('tr-TR')} Papel/lot**`,
-                                        `> Founder hissesi: **%${Math.round(ipoApp.proposed_founder_ratio * 100)}** (${founderLots.toLocaleString()} lot)`,
-                                        `> Halka açık: **${publicLots.toLocaleString()} lot**`,
-                                        `> Tahmini tarih: **${ipoApp.estimated_date ?? '-'}**`,
-                                        '',
-                                        '🤖 Bu onay otomatik olarak gerçekleştirildi.',
-                                    ].join('\n'),
-                                    color: 0x57F287,
-                                    timestamp: new Date().toISOString(),
-                                }],
-                            }),
-                        });
-                    }
-
-                    // 5. IPO review kanalına da bilgi ver
-                    const reviewChannelId = process.env.IPO_REVIEW_CHANNEL_ID ?? process.env.ECONOMY_REVIEW_CHANNEL_ID ?? '';
-                    if (reviewChannelId) {
-                        await fetch(`https://discord.com/api/v10/channels/${reviewChannelId}/messages`, {
-                            method: 'POST',
-                            headers: {
-                                Authorization: `Bot ${process.env.DISCORD_TOKEN}`,
-                                'Content-Type': 'application/json',
-                            },
-                            body: JSON.stringify({
-                                embeds: [{
-                                    title: '🤖 IPO Otomatik Onaylandı',
-                                    description: `**${ipoApp.guild_stats_snapshot?.server_name ?? ipoApp.guild_id}** sunucusunun IPO başvurusu (ID: \`${ipoApp.id}\`) tahmini tarihe 2 gün kala otomatik onaylandı.`,
-                                    color: 0x57F287,
-                                    timestamp: new Date().toISOString(),
-                                }],
-                            }),
-                        });
-                    }
-
-                    // 6. Dev log kanalına kaydet
-                    logToChannel(client, 'basvuru_onay', logEmbeds.onay({
-                        type: 'IPO (Otomatik)',
-                        guildId: ipoApp.guild_id,
-                        reviewerId: null,
-                        detail: `Fiyat: ${ipoApp.proposed_price.toLocaleString()} Papel/lot · Founder: %${Math.round(ipoApp.proposed_founder_ratio * 100)} · Tahmini tarih: ${ipoApp.estimated_date ?? '-'}`,
-                    }));
-
-                    // Market event: IPO launch haberi
-                    const serverName = ipoApp.guild_stats_snapshot?.server_name ?? ipoApp.guild_id;
-                    await insertMarketEvent('ipo_launch', ipoApp.guild_id, null, { server_name: serverName, price: ipoApp.proposed_price });
-
-                    console.log(`[IPO AutoApprove] ✅ ${ipoApp.guild_id} otomatik onaylandı`);
-                } catch (appErr) {
-                    console.error(`[IPO AutoApprove] ❌ ${ipoApp.guild_id} hatası:`, appErr);
-                }
-            }
-        } catch (err) {
-            console.error('[IPO AutoApprove] Genel hata:', err);
-        }
-    }, 60000); // her dakika kontrol et, saat 01:00'de çalışır
-
-    // ── Borsa Günlük Cron'ları ────────────────────────────────────────────────
-    let borsaCronDate = null; // günde bir kez çalışır (tüm borsa cron'ları için ortak guard)
-
-    setInterval(async () => {
-        const now = new Date();
-        const todayStr = now.toISOString().slice(0, 10);
-        const currentHour = now.getUTCHours();
-        const currentMinute = now.getUTCMinutes();
-
-        // ── 00:00 — Günlük fiyat güncelleme + price_history OHLCV kaydı ──────
-        if (currentHour === 0 && currentMinute < 5 && borsaCronDate !== `${todayStr}-price`) {
-            borsaCronDate = `${todayStr}-price`; // sadece bu sub-task için değil, ayrı guard lazım, ama 5dk pencere yeterli
-            try {
-                const { data: listings } = await supabase
-                    .from('server_listings')
-                    .select('guild_id, market_price, current_day_high, current_day_low, ipo_price, public_lots, circulating_lots, support_threshold')
-                    .eq('status', 'approved');
-
-                for (const listing of listings ?? []) {
-                    const yesterdayDate = new Date(now);
-                    yesterdayDate.setUTCDate(yesterdayDate.getUTCDate() - 1);
-                    const yesterdayStr = yesterdayDate.toISOString().slice(0, 10);
-                    // Önceki günün fiyatını al (kapanış fiyatı = bugünkü market_price)
-                    const closePrice = Number(listing.market_price);
-                    const dayHigh = listing.current_day_high ? Number(listing.current_day_high) : closePrice;
-                    const dayLow = listing.current_day_low ? Number(listing.current_day_low) : closePrice;
-
-                    // Dün için price_history upsert (bugün = yeni başlayacak)
-                    await supabase.from('price_history').upsert(
-                        {
-                            guild_id: listing.guild_id,
-                            date: yesterdayStr,
-                            open_price: closePrice, // open bilinmiyor, kapanışı kullan (gün içinde trade'ler açılışı günceller)
-                            close_price: closePrice,
-                            high_price: dayHigh,
-                            low_price: dayLow,
-                            volume_lots: 0, // trade'ler zaten gün içinde volume ekliyor; bu sadece backfill
-                        },
-                        { onConflict: 'guild_id,date', ignoreDuplicates: true }
-                    );
-
-                    // Yeni gün için gün high/low sıfırla
-                    await supabase
-                        .from('server_listings')
-                        .update({ current_day_high: null, current_day_low: null })
-                        .eq('guild_id', listing.guild_id);
-
-                    // support_threshold hesapla (market_price * 0.85)
-                    const supportThreshold = Math.round(closePrice * 0.85 * 100) / 100;
-                    await supabase
-                        .from('server_listings')
-                        .update({ support_threshold: supportThreshold })
-                        .eq('guild_id', listing.guild_id)
-                        .is('support_threshold', null);
-                }
-                console.log(`[Borsa 00:00] Günlük fiyat cron tamamlandı — ${(listings ?? []).length} listing.`);
-            } catch (err) {
-                console.error('[Borsa 00:00] Hata:', err);
-            }
-        }
-
-        // ── 00:01 — Günlük satış limiti sıfırla ─────────────────────────────
-        if (currentHour === 0 && currentMinute >= 1 && currentMinute < 6 && borsaCronDate !== `${todayStr}-sell-reset`) {
-            borsaCronDate = `${todayStr}-sell-reset`;
-            try {
-                const { error } = await supabase
-                    .from('investor_holdings')
-                    .update({ daily_sell_used: 0, daily_sell_reset_date: todayStr })
-                    .neq('daily_sell_used', 0);
-                if (!error) console.log('[Borsa 00:01] Günlük satış limitleri sıfırlandı.');
-            } catch (err) {
-                console.error('[Borsa 00:01] Satış limit sıfırlama hatası:', err);
-            }
-        }
-
-        // ── 00:05 — Founder vesting (gün 15 / 30 / 45) ───────────────────────
-        if (currentHour === 0 && currentMinute >= 5 && currentMinute < 10 && borsaCronDate !== `${todayStr}-vesting`) {
-            borsaCronDate = `${todayStr}-vesting`;
-            try {
-                const { data: listings } = await supabase
-                    .from('server_listings')
-                    .select('guild_id, founder_lots, founder_vested_lots, vesting_start_date, market_price')
-                    .eq('status', 'approved')
-                    .not('vesting_start_date', 'is', null);
-
-                for (const listing of listings ?? []) {
-                    const vestingStart = new Date(listing.vesting_start_date);
-                    const daysSinceVesting = Math.floor((Date.now() - vestingStart.getTime()) / 86400000);
-                    const founderLots = Number(listing.founder_lots ?? 0);
-                    const alreadyVested = Number(listing.founder_vested_lots ?? 0);
-
-                    // %33 her 15 günde bir (3 dilim)
-                    const vestingSlice = Math.floor(founderLots * 0.33);
-                    let expectedVested = 0;
-                    if (daysSinceVesting >= 45) expectedVested = founderLots;
-                    else if (daysSinceVesting >= 30) expectedVested = vestingSlice * 2;
-                    else if (daysSinceVesting >= 15) expectedVested = vestingSlice;
-
-                    if (expectedVested > alreadyVested) {
-                        const newlyVested = expectedVested - alreadyVested;
-                        await supabase
-                            .from('server_listings')
-                            .update({ founder_vested_lots: expectedVested })
-                            .eq('guild_id', listing.guild_id);
-
-                        // Founder'ın holdings'ini güncelle (founder_user_id lazım)
-                        // server_listings'de founder_user_id yoksa ipo_applications'tan al
-                        const { data: ipoApp } = await supabase
-                            .from('ipo_applications')
-                            .select('applicant_user_id')
-                            .eq('guild_id', listing.guild_id)
-                            .eq('status', 'approved')
-                            .maybeSingle();
-
-                        if (ipoApp) {
-                            const { data: existingHolding } = await supabase
-                                .from('investor_holdings')
-                                .select('lot_count, avg_buy_price')
-                                .eq('user_id', ipoApp.applicant_user_id)
-                                .eq('guild_id', listing.guild_id)
-                                .maybeSingle();
-
-                            const prevLots = Number(existingHolding?.lot_count ?? 0);
-                            const newLots = prevLots + newlyVested;
-                            await supabase.from('investor_holdings').upsert(
-                                {
-                                    user_id: ipoApp.applicant_user_id,
-                                    guild_id: listing.guild_id,
-                                    lot_count: newLots,
-                                    avg_buy_price: existingHolding?.avg_buy_price ?? listing.market_price,
-                                    updated_at: now.toISOString(),
-                                },
-                                { onConflict: 'user_id,guild_id' }
-                            );
-
-                            console.log(`[Borsa Vesting] ${listing.guild_id}: ${newlyVested} lot açıldı (gün ${daysSinceVesting}).`);
-                        }
-                    }
-                }
-            } catch (err) {
-                console.error('[Borsa 00:05] Vesting hatası:', err);
-            }
-        }
-
-        // ── 02:00 — Hazine destek alımı kontrolü ─────────────────────────────
-        if (currentHour === 2 && currentMinute < 5 && borsaCronDate !== `${todayStr}-treasury`) {
-            borsaCronDate = `${todayStr}-treasury`;
-            try {
-                const { data: listings } = await supabase
-                    .from('server_listings')
-                    .select('guild_id, market_price, support_threshold, support_days_below, circulating_lots')
-                    .eq('status', 'approved')
-                    .not('support_threshold', 'is', null);
-
-                for (const listing of listings ?? []) {
-                    const marketPrice = Number(listing.market_price);
-                    const threshold = Number(listing.support_threshold);
-                    const daysBelow = Number(listing.support_days_below ?? 0);
-
-                    if (marketPrice < threshold) {
-                        const newDaysBelow = daysBelow + 1;
-                        await supabase
-                            .from('server_listings')
-                            .update({ support_days_below: newDaysBelow })
-                            .eq('guild_id', listing.guild_id);
-
-                        // 3 gün eşik altındaysa hazine destek alımı yap
-                        if (newDaysBelow >= 3) {
-                            const { data: treasury } = await supabase
-                                .from('server_mari_treasury')
-                                .select('support_reserve')
-                                .eq('guild_id', listing.guild_id)
-                                .maybeSingle();
-
-                            const reserve = Number(treasury?.support_reserve ?? 0);
-                            if (reserve > 0 && marketPrice > 0) {
-                                // Reserve'in %10'uyla lot al (max 100 lot)
-                                const spendAmount = Math.min(reserve * 0.1, 10000);
-                                const lotsToBuy = Math.min(100, Math.floor(spendAmount / marketPrice));
-
-                                if (lotsToBuy > 0) {
-                                    // treasury_holdings güncelle
-                                    const { data: th } = await supabase
-                                        .from('treasury_holdings')
-                                        .select('lot_count, avg_buy_price')
-                                        .eq('guild_id', listing.guild_id)
-                                        .maybeSingle();
-
-                                    const prevLots = Number(th?.lot_count ?? 0);
-                                    const prevAvg = Number(th?.avg_buy_price ?? 0);
-                                    const newLots = prevLots + lotsToBuy;
-                                    const newAvg = prevLots === 0
-                                        ? marketPrice
-                                        : Math.round(((prevAvg * prevLots + marketPrice * lotsToBuy) / newLots) * 100) / 100;
-
-                                    await supabase.from('treasury_holdings').upsert(
-                                        { guild_id: listing.guild_id, lot_count: newLots, avg_buy_price: newAvg, last_updated: now.toISOString() },
-                                        { onConflict: 'guild_id' }
-                                    );
-
-                                    const cost = Math.round(lotsToBuy * marketPrice * 100) / 100;
-                                    await supabase
-                                        .from('server_mari_treasury')
-                                        .update({
-                                            support_reserve: Math.max(0, reserve - cost),
-                                            last_updated: now.toISOString(),
-                                        })
-                                        .eq('guild_id', listing.guild_id);
-
-                                    // circulating_lots artır (hazine kendi lotunu tutuyor)
-                                    await supabase
-                                        .from('server_listings')
-                                        .update({ circulating_lots: (Number(listing.circulating_lots ?? 0) + lotsToBuy) })
-                                        .eq('guild_id', listing.guild_id);
-
-                                    await insertMarketEvent('treasury_support', listing.guild_id, null, { server_name: listing.guild_id, lot_count: lotsToBuy });
-                                    console.log(`[Borsa Treasury] ${listing.guild_id}: ${lotsToBuy} lot destek alımı, ${cost} Mari harcandı.`);
-                                }
-                            }
-                            // Sayacı sıfırla
-                            await supabase
-                                .from('server_listings')
-                                .update({ support_days_below: 0 })
-                                .eq('guild_id', listing.guild_id);
-                        }
-                    } else {
-                        // Eşik üstünde, sayacı sıfırla
-                        if (daysBelow > 0) {
-                            await supabase
-                                .from('server_listings')
-                                .update({ support_days_below: 0 })
-                                .eq('guild_id', listing.guild_id);
-                        }
-                    }
-                }
-                console.log(`[Borsa 02:00] Hazine destek kontrolü tamamlandı.`);
-            } catch (err) {
-                console.error('[Borsa 02:00] Hazine hatası:', err);
-            }
-        }
-
-        // ── 02:30 — Delist kontrolü ───────────────────────────────────────────
-        if (currentHour === 2 && currentMinute >= 30 && currentMinute < 35 && borsaCronDate !== `${todayStr}-delist`) {
-            borsaCronDate = `${todayStr}-delist`;
-            try {
-                const { data: listings } = await supabase
-                    .from('server_listings')
-                    .select('guild_id, market_price, ipo_price, delist_days_below')
-                    .eq('status', 'approved');
-
-                for (const listing of listings ?? []) {
-                    const marketPrice = Number(listing.market_price);
-                    const ipoPrice = Number(listing.ipo_price);
-                    const delistThreshold = Math.round(ipoPrice * 0.5 * 100) / 100; // IPO fiyatının %50'si
-                    const daysBelow = Number(listing.delist_days_below ?? 0);
-
-                    if (marketPrice < delistThreshold) {
-                        const newDaysBelow = daysBelow + 1;
-                        await supabase
-                            .from('server_listings')
-                            .update({ delist_days_below: newDaysBelow })
-                            .eq('guild_id', listing.guild_id);
-
-                        if (newDaysBelow >= 5) {
-                            // Otomatik delist: tüm yatırımcılara tazminat öde
-                            const { data: holders } = await supabase
-                                .from('investor_holdings')
-                                .select('user_id, lot_count')
-                                .eq('guild_id', listing.guild_id)
-                                .gt('lot_count', 0);
-
-                            for (const holder of holders ?? []) {
-                                const compensation = Math.round(Number(holder.lot_count) * delistThreshold * 100) / 100;
-                                // member_wallets'a tazminat ekle
-                                const { data: wallet } = await supabase
-                                    .from('member_wallets')
-                                    .select('mari_balance')
-                                    .eq('user_id', holder.user_id)
-                                    .eq('guild_id', process.env.PLATFORM_GUILD_ID ?? 'platform')
-                                    .maybeSingle();
-
-                                const newBalance = Math.round((Number(wallet?.mari_balance ?? 0) + compensation) * 100) / 100;
-                                await supabase.from('member_wallets').upsert(
-                                    { user_id: holder.user_id, guild_id: process.env.PLATFORM_GUILD_ID ?? 'platform', mari_balance: newBalance, updated_at: now.toISOString() },
-                                    { onConflict: 'user_id,guild_id' }
-                                );
-
-                                await supabase
-                                    .from('investor_holdings')
-                                    .update({ lot_count: 0, updated_at: now.toISOString() })
-                                    .eq('user_id', holder.user_id)
-                                    .eq('guild_id', listing.guild_id);
-                            }
-
-                            // Listing'i delist et
-                            await supabase
-                                .from('server_listings')
-                                .update({ status: 'delisted', delist_days_below: newDaysBelow })
-                                .eq('guild_id', listing.guild_id);
-
-                            await insertMarketEvent('delist', listing.guild_id, null, { server_name: listing.guild_id });
-                            console.log(`[Borsa Delist] ${listing.guild_id} delisted. ${(holders ?? []).length} yatırımcıya tazminat ödendi.`);
-                        }
-                    } else {
-                        if (daysBelow > 0) {
-                            await supabase
-                                .from('server_listings')
-                                .update({ delist_days_below: 0 })
-                                .eq('guild_id', listing.guild_id);
-                        }
-                    }
-                }
-                console.log(`[Borsa 02:30] Delist kontrolü tamamlandı.`);
-            } catch (err) {
-                console.error('[Borsa 02:30] Delist hatası:', err);
-            }
-        }
-
-        // ── Pazartesi 01:00 — Temettü dağıtımı ───────────────────────────────
-        const isMonday = now.getUTCDay() === 1;
-        if (isMonday && currentHour === 1 && currentMinute >= 5 && currentMinute < 10 && borsaCronDate !== `${todayStr}-dividend`) {
-            borsaCronDate = `${todayStr}-dividend`;
-            try {
-                // Önceki haftanın başlangıcı (geçen Pazartesi)
-                const lastMonday = new Date(now);
-                lastMonday.setUTCDate(lastMonday.getUTCDate() - 7);
-                const lastMondayStr = lastMonday.toISOString().slice(0, 10);
-
-                const { data: pools } = await supabase
-                    .from('dividend_pool')
-                    .select('guild_id, total_mari')
-                    .eq('week_start', lastMondayStr)
-                    .eq('distributed', false)
-                    .gt('total_mari', 0);
-
-                for (const pool of pools ?? []) {
-                    const poolTotal = Number(pool.total_mari);
-                    const guildId = pool.guild_id;
-
-                    const { data: listing } = await supabase
-                        .from('server_listings')
-                        .select('circulating_lots')
-                        .eq('guild_id', guildId)
-                        .maybeSingle();
-
-                    const circulatingLots = Number(listing?.circulating_lots ?? 0);
-                    if (circulatingLots === 0) continue;
-
-                    const { data: holders } = await supabase
-                        .from('investor_holdings')
-                        .select('user_id, lot_count')
-                        .eq('guild_id', guildId)
-                        .gt('lot_count', 0);
-
-                    for (const holder of holders ?? []) {
-                        const lots = Number(holder.lot_count);
-                        const share = lots / circulatingLots;
-                        const payout = Math.round(poolTotal * share * 100) / 100;
-                        if (payout <= 0) continue;
-
-                        // Mari öde
-                        const { data: wallet } = await supabase
-                            .from('member_wallets')
-                            .select('mari_balance')
-                            .eq('user_id', holder.user_id)
-                            .eq('guild_id', process.env.PLATFORM_GUILD_ID ?? 'platform')
-                            .maybeSingle();
-
-                        const newBalance = Math.round((Number(wallet?.mari_balance ?? 0) + payout) * 100) / 100;
-                        await supabase.from('member_wallets').upsert(
-                            { user_id: holder.user_id, guild_id: process.env.PLATFORM_GUILD_ID ?? 'platform', mari_balance: newBalance, updated_at: now.toISOString() },
-                            { onConflict: 'user_id,guild_id' }
-                        );
-
-                        // dividend_history kaydı
-                        await supabase.from('dividend_history').insert({
-                            guild_id: guildId,
-                            user_id: holder.user_id,
-                            week_start: lastMondayStr,
-                            lot_snapshot: lots,
-                            mari_received: payout,
-                            distributed_at: now.toISOString(),
-                        });
-                    }
-
-                    // Havuzu dağıtıldı olarak işaretle
-                    await supabase
-                        .from('dividend_pool')
-                        .update({ distributed: true, distributed_at: now.toISOString() })
-                        .eq('guild_id', guildId)
-                        .eq('week_start', lastMondayStr);
-
-                    await insertMarketEvent('dividend_paid', guildId, null, { server_name: guildId, mari: poolTotal });
-                    console.log(`[Borsa Temettü] ${guildId}: ${poolTotal} Mari, ${(holders ?? []).length} yatırımcıya dağıtıldı.`);
-                }
-            } catch (err) {
-                console.error('[Borsa Temettü] Hata:', err);
-            }
-        }
-
-    }, 60000); // her dakika kontrol et
-    // ── Borsa Günlük Cron'ları Sonu ──────────────────────────────────────────
-
-    // ── AI Günlük Piyasa Planı ────────────────────────────────────────────────
-    let dailyPlanCreatedDate = null; // YYYY-MM-DD olarak tutulur
-    let lastExecutedPlanHour = -1;
-
-    setInterval(async () => {
-        const now = new Date();
-        const todayStr = now.toISOString().slice(0, 10);
-        const currentHour = now.getHours();
-
-        // Gece 00:00 – tüm approved listing'ler için plan oluştur
-        if (currentHour === 0 && dailyPlanCreatedDate !== todayStr) {
-            dailyPlanCreatedDate = todayStr;
-            try {
-                const webUrl = process.env.WEB_URL || 'https://discoweb.vercel.app';
-                const internalSecret = process.env.INTERNAL_API_SECRET || '';
-                const { data: listings } = await supabase
-                    .from('server_listings')
-                    .select('guild_id')
-                    .eq('status', 'approved');
-                for (const row of (listings ?? [])) {
-                    try {
-                        await fetch(`${webUrl}/api/developer/ai-daily-plan`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json', 'x-internal-secret': internalSecret },
-                            body: JSON.stringify({ guildId: row.guild_id }),
-                        });
-                    } catch (e) {
-                        console.error(`[DailyPlan] Guild ${row.guild_id} plan oluşturma hatası:`, e);
-                    }
-                }
-                console.log(`[DailyPlan] ${(listings ?? []).length} sunucu için plan oluşturuldu.`);
-            } catch (e) {
-                console.error('[DailyPlan] Midnight plan generator hatası:', e);
-            }
-        }
-
-        // Her saat başı – o saatin planlı event'ini uygula
-        if (currentHour !== lastExecutedPlanHour) {
-            lastExecutedPlanHour = currentHour;
-            try {
-                const { data: plans } = await supabase
-                    .from('market_daily_plans')
-                    .select('*')
-                    .eq('plan_date', todayStr);
-                for (const plan of (plans ?? [])) {
-                    const schedule = Array.isArray(plan.hourly_schedule) ? plan.hourly_schedule : [];
-                    const entry = schedule.find(s => s.hour === currentHour && !s.executed && s.price_impact !== 0);
-                    if (!entry) continue;
-
-                    // market_events tablosuna ekle (1 saatlik geçerlilik)
-                    const expiresAt = new Date(now.getTime() + 60 * 60 * 1000).toISOString();
-                    await supabase.from('market_events').insert({
-                        guild_id: plan.guild_id,
-                        type: 'price_adjustment',
-                        severity: Math.abs(entry.price_impact) >= 0.1 ? 'warning' : 'info',
-                        title: entry.title || `Saat ${currentHour}:00 Hareketi`,
-                        description: entry.description || '',
-                        price_impact: entry.price_impact,
-                        is_active: true,
-                        expires_at: expiresAt,
-                    });
-
-                    // executed = true olarak işaretle
-                    const updatedSchedule = schedule.map(s =>
-                        s.hour === currentHour ? { ...s, executed: true } : s
-                    );
-                    await supabase.from('market_daily_plans')
-                        .update({ hourly_schedule: updatedSchedule })
-                        .eq('id', plan.id);
-                }
-            } catch (e) {
-                console.error('[DailyPlan] Saatlik executor hatası:', e);
-            }
-        }
-    }, 60000);
-    // ── AI Günlük Piyasa Planı Sonu ──────────────────────────────────────────
 });
 
 // Mesaj Geldiğinde (Prefix komutları için)
 client.on('messageCreate', async (message) => {
+    // Mesaj kazancı işle (bot mesajlarını handleMessage içinde filtreler)
+    console.log(`[messageCreate] fired guild:${message.guild?.id} user:${message.author?.id} bot:${message.author?.bot}`);
+    handleMessage(message, config, addDailyEarning).catch(err => console.error('[messageCreate] handleMessage error:', err));
+
     // Bot etiketlendiğinde bilgilendirici embed gönder
     if (message.mentions.has(client.user) && !message.author.bot && !message.mentions.everyone) {
         try {
@@ -1502,14 +787,7 @@ client.on('messageCreate', async (message) => {
         return;
     }
 
-    // Mesaj kazancı ekle (bot etiketlenmediğinde)
-    try {
-        await addMessageEarning(message);
-    } catch (err) {
-        console.error('Message earning error:', err);
-    }
 });
-
 // Update permission cache when members change (roles, nicknames, boost status)
 client.on('guildMemberUpdate', async (oldMember, newMember) => {
     try {
@@ -1545,6 +823,42 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
             } else {
                 const body = mailTemplates.renderTagLost(newMember.user.username);
                 await sendSystemMail({ guildId, userId, title: 'Sancak Düştü!', bodyHtml: body });
+
+                // Revoke all badge tier roles when tag is removed
+                try {
+                    const botToken = process.env.DISCORD_BOT_TOKEN;
+                    if (botToken) {
+                        // Get all rewarded badge tiers that have a role_id for this user/guild
+                        const { data: rewards } = await supabase
+                            .from('member_badge_rewards')
+                            .select('badge_tier_id')
+                            .eq('guild_id', guildId)
+                            .eq('user_id', userId);
+                        if (rewards && rewards.length > 0) {
+                            const tierIds = rewards.map(r => r.badge_tier_id);
+                            const { data: tiers } = await supabase
+                                .from('badge_tiers')
+                                .select('id,role_id')
+                                .in('id', tierIds)
+                                .not('role_id', 'is', null);
+                            for (const tier of tiers ?? []) {
+                                if (!tier.role_id) continue;
+                                await fetch(
+                                    `https://discord.com/api/guilds/${guildId}/members/${userId}/roles/${tier.role_id}`,
+                                    { method: 'DELETE', headers: { Authorization: `Bot ${botToken}` } }
+                                ).catch(() => {});
+                            }
+                        }
+                        // Also clear current_badge_tier_id and reset tag tracking in DB
+                        await supabase
+                            .from('member_profiles')
+                            .update({ has_tag: false, tag_granted_at: null, current_badge_tier_id: null })
+                            .eq('guild_id', guildId)
+                            .eq('user_id', userId);
+                    }
+                } catch (e) {
+                    console.warn('Badge role revoke on tag loss failed', e);
+                }
             }
         }
 
@@ -1630,6 +944,18 @@ client.on('userUpdate', async (oldUser, newUser) => {
         }
     } catch (e) {
         console.warn('userUpdate permissionCache handling failed', e);
+    }
+});
+// Bot yeni bir sunucuya eklendiğinde
+client.on('guildCreate', async (guild) => {
+    console.log(`🎉 Bot yeni sunucuya eklendi: ${guild.name} (${guild.id})`);
+    
+    try {
+        // Yeni sunucuya slash komutlarını kaydet
+        await registerSlashCommands(guild.id);
+        console.log(`✅ Slash komutları ${guild.name} sunucusuna başarıyla kaydedildi!`);
+    } catch (error) {
+        console.error(`❌ ${guild.name} sunucusuna slash komutları kaydedilirken hata:`, error);
     }
 });
 
