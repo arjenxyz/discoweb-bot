@@ -18,6 +18,7 @@ const { processVoiceEarnings, addDailyEarning, processDailySettlement } = requir
 const { handleMessage } = require('./modules/commands/index');
 const { logSystemError } = require('./modules/errorHandler');
 const permissionCache = require('./modules/permissionCache');
+const antiSpam = require('./modules/antiSpam');
 const mailTemplates = require('./modules/mailTemplates');
 const { sendSystemMail } = require('./modules/notifications');
 const { formatUser, truncate } = require('./modules/logger');
@@ -710,12 +711,23 @@ client.once('ready', async () => {
         }
     });
 
+    // Auto-settlement at 00:00 TR (21:00 UTC) — check every minute
     setInterval(() => {
-        // Tüm sunucular için daily settlement
-        client.guilds.cache.forEach((guild) => {
-            void processDailySettlement(guild.id);
-        });
+        const now = new Date();
+        // TR time = UTC+3
+        const trHour = (now.getUTCHours() + 3) % 24;
+        const trMinute = now.getUTCMinutes();
+        // Trigger at 00:00 TR (allow 0-1 minute window)
+        if (trHour === 0 && trMinute === 0) {
+            console.log('[settlement] 00:00 TR — running auto-settlement for all guilds');
+            client.guilds.cache.forEach((guild) => {
+                void processDailySettlement(guild.id);
+            });
+        }
     }, 60000);
+
+    // Anti-spam cleanup every 5 minutes
+    setInterval(() => antiSpam.cleanup(), 5 * 60 * 1000);
 });
 
 // Mesaj Geldiğinde (Prefix komutları için)

@@ -2,7 +2,8 @@
 const { autoRegisterIfNeeded, handleKayitCommand, handleProfilCommand, handleParaCommand, handleTopCommand } = require('./user');
 const { handleMagazaEkleCommand, handlePromoKodCommand, handleMagazaSilCommand, handleBakimCommand, handleKurulumKaldirCommand } = require('./admin');
 const { supabase } = require('../../modules/database');
-const { addBalance, upsertMemberDailyStats, upsertServerDailyStats } = require('../../modules/earnings');
+const { addDailyEarning, upsertMemberDailyStats, upsertServerDailyStats } = require('../../modules/earnings');
+const { shouldEarnMessage } = require('../../modules/antiSpam');
 
 // Simple in-memory cache for server settings to avoid DB hit on every message
 const serverConfigCache = new Map(); // guildId -> { ts, data }
@@ -16,7 +17,7 @@ const getServerConfig = async (guildId) => {
     try {
             const { data } = await supabase
                         .from('servers')
-                        .select('verify_role_id,admin_role_id,discord_id,earn_per_message,message_earn_enabled,earn_per_voice_minute,voice_earn_enabled,tag_id,tag_bonus_message,tag_bonus_voice,booster_bonus_message,booster_bonus_voice,earn_channels')
+                        .select('verify_role_id,admin_role_id,discord_id,earn_per_message,message_earn_enabled,earn_per_voice_minute,voice_earn_enabled,tag_id,tag_bonus_message,tag_bonus_voice,booster_bonus_message,booster_bonus_voice,earn_channels,spam_message_cooldown_ms,spam_min_message_length,spam_flood_count,spam_flood_window_ms,spam_duplicate_count,daily_message_earn_cap,daily_voice_earn_cap')
                 .eq('discord_id', guildId)
                 .maybeSingle();
 
@@ -85,6 +86,11 @@ const handleMessage = async (message, config, addDailyEarning) => {
 
     // Eğer onaylı üye ise otomatik kayıt et ve anlık bakiye ekle
     if (messageEarnEnabled && isApproved && earnPerMessage > 0) {
+        // Anti-spam kontrolü
+        const spamResult = shouldEarnMessage(message.guild.id, message.author.id, message, serverCfg);
+        if (!spamResult.allowed) {
+            console.log(`[antiSpam] message blocked guild:${message.guild.id} user:${message.author.id} reason:${spamResult.reason}`);
+        } else {
         await autoRegisterIfNeeded(message.author.id, message.author.username);
         try {
             // compute tag/booster bonuses via permission cache when available
@@ -134,7 +140,7 @@ const handleMessage = async (message, config, addDailyEarning) => {
                 }
             }
 
-            await addBalance(message.guild.id, message.author.id, total, 'earn_message', {
+            await addDailyEarning(message.guild.id, message.author.id, 'message', total, {
                 channelId: message.channel.id,
                 base: earnPerMessage,
                 bonus: bonus,
@@ -153,6 +159,7 @@ const handleMessage = async (message, config, addDailyEarning) => {
         } catch (e) {
             console.error('Error adding immediate message earnings', e);
         }
+        } // else (anti-spam passed)
     }
 
     const isAdmin = config.adminRoleId ? message.member?.roles?.cache?.has(config.adminRoleId) : false;

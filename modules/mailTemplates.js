@@ -273,6 +273,65 @@ function renderRoleLostHTML(roleName, userTag) {
 
 
 // ============================================
+// EARNINGS SETTLEMENT TEMPLATES
+// ============================================
+
+function renderEarningsClaimedHTML(totalAmount, messageAmount, voiceAmount, rowCount) {
+  const greeting = 'Merhaba,';
+  const body = `
+    <p style="margin: 0 0 16px 0;">
+      Biriken kazançlarınız talebiniz üzerine hesabınıza başarıyla aktarılmıştır.
+    </p>
+
+    <div style="background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 20px; margin: 20px 0;">
+      <h3 style="margin: 0 0 12px 0; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #92400e;">
+        💰 Kazanç Özeti
+      </h3>
+      <div style="color: #78350f; font-size: 14px;">
+        <p style="margin: 0 0 8px 0;"><strong>Toplam:</strong> ${esc(String(totalAmount))} papel</p>
+        <p style="margin: 0 0 4px 0;">💬 Mesaj kazancı: ${esc(String(messageAmount))} papel</p>
+        <p style="margin: 0 0 4px 0;">🎙️ Ses kazancı: ${esc(String(voiceAmount))} papel</p>
+        <p style="margin: 8px 0 0 0; font-size: 12px; color: #a16207;">${rowCount} kazanç kaydı işlendi</p>
+      </div>
+    </div>
+
+    <p style="margin: 0; color: #4b5563;">
+      Kazancınız cüzdanınıza yansımıştır. Mağazadan dilediğiniz ürünleri satın alabilirsiniz.
+    </p>
+  `;
+
+  return renderMailHTML('Kazançlarınız Hesabınıza Tanımlandı', greeting, body, '💰');
+}
+
+function renderEarningsAutoSettledHTML(totalAmount, messageAmount, voiceAmount, rowCount, settlementTime) {
+  const greeting = 'Merhaba,';
+  const body = `
+    <p style="margin: 0 0 16px 0;">
+      Biriken kazançlarınız <strong>${esc(settlementTime)}</strong> itibarıyla sistem tarafından otomatik olarak hesabınıza aktarılmıştır.
+    </p>
+
+    <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 20px; margin: 20px 0;">
+      <h3 style="margin: 0 0 12px 0; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #166534;">
+        🏦 Otomatik Tanımlama Özeti
+      </h3>
+      <div style="color: #15803d; font-size: 14px;">
+        <p style="margin: 0 0 8px 0;"><strong>Toplam:</strong> ${esc(String(totalAmount))} papel</p>
+        <p style="margin: 0 0 4px 0;">💬 Mesaj kazancı: ${esc(String(messageAmount))} papel</p>
+        <p style="margin: 0 0 4px 0;">🎙️ Ses kazancı: ${esc(String(voiceAmount))} papel</p>
+        <p style="margin: 8px 0 0 0; font-size: 12px; color: #16a34a;">${rowCount} kazanç kaydı işlendi</p>
+      </div>
+    </div>
+
+    <p style="margin: 0; color: #4b5563;">
+      Alınmayan kazançlar her gece saat 00:00'da otomatik olarak hesabınıza tanımlanır. Kazançlarınızı dilediğiniz zaman web panelden manuel olarak da alabilirsiniz.
+    </p>
+  `;
+
+  return renderMailHTML('Kazançlarınız Otomatik Olarak Tanımlandı', greeting, body, '🏦');
+}
+
+
+// ============================================
 // EXPORTS
 // ============================================
 
@@ -293,6 +352,10 @@ module.exports = {
   renderRoleGainedHTML,
   renderRoleLostHTML,
   
+  // Earnings
+  renderEarningsClaimedHTML,
+  renderEarningsAutoSettledHTML,
+
   // Legacy aliases
   renderTagGained: renderTagGainedHTML,
   renderTagLost: renderTagLostHTML,

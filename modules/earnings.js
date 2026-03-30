@@ -1,6 +1,9 @@
 // modules/earnings.js
 const { supabase, getGuild, getLocalDate } = require('./database');
 const { EmbedBuilder } = require('discord.js');
+const { isVoiceEligible } = require('./antiSpam');
+const { sendSystemMail } = require('./notifications');
+const { renderEarningsAutoSettledHTML } = require('./mailTemplates');
 
 // Log gönderme fonksiyonu
 async function sendWalletLog(guildId, embed) {
@@ -142,6 +145,13 @@ const processVoiceEarnings = async (client, guildId, requiredRoleId, earnPerVoic
         const isApproved = Boolean(member.roles.cache.has(cfgVerifyRole));
         if (!isApproved) continue;
 
+        // Anti-spam: check voice eligibility
+        const voiceCheck = isVoiceEligible(voiceState);
+        if (!voiceCheck.allowed) {
+            console.log(`[antiSpam] voice skip guild:${guildId} user:${member.id} reason:${voiceCheck.reason}`);
+            continue;
+        }
+
                 // compute tag/booster bonuses using permission cache when available
                 const permissionCache = require('./permissionCache');
                 let hasTag = false;
@@ -196,8 +206,8 @@ const processVoiceEarnings = async (client, guildId, requiredRoleId, earnPerVoic
             }
         }
 
-        // Award immediately per-minute while in voice (no daily_earnings accumulation)
-            await addBalance(guildId, member.id, total, 'earn_voice', {
+        // Accumulate in daily_earnings (settled via claim or auto-settlement at 00:00 TR)
+            await addDailyEarning(guildId, member.id, 'voice', total, {
             channelId: voiceState.channelId,
             base: perMinute,
             bonus,
@@ -349,9 +359,77 @@ const upsertServerDailyStats = async (guildId, statDate, messageCount, voiceMinu
     }
 };
 
+/**
+ * Auto-settle all pending daily_earnings for a guild.
+ * Called at 00:00 TR time (21:00 UTC) — transfers unclaimed earnings to wallets.
+ */
 const processDailySettlement = async (guildId) => {
-    // Daily accumulation/settlement disabled: earnings are awarded immediately per-message and per-voice-minute.
-    return;
+    try {
+        // Fetch all unsettled daily_earnings for this guild
+        const { data: rows, error: fetchErr } = await supabase
+            .from('daily_earnings')
+            .select('id,user_id,amount,source,metadata')
+            .eq('guild_id', guildId)
+            .is('settled_at', null)
+            .is('deleted_at', null);
+
+        if (fetchErr) {
+            console.error(`[settlement] fetch error guild:${guildId}`, fetchErr);
+            return;
+        }
+        if (!rows || rows.length === 0) return;
+
+        // Group by user
+        const byUser = {};
+        for (const row of rows) {
+            if (!byUser[row.user_id]) byUser[row.user_id] = [];
+            byUser[row.user_id].push(row);
+        }
+
+        let settledCount = 0;
+        for (const [userId, userRows] of Object.entries(byUser)) {
+            const total = Number(userRows.reduce((s, r) => s + Number(r.amount ?? 0), 0).toFixed(2));
+            if (total <= 0) continue;
+
+            // Add to wallet
+            await addBalance(guildId, userId, total, 'daily_settlement', {
+                rowCount: userRows.length,
+                autoSettlement: true,
+            });
+
+            // Mark as settled
+            const ids = userRows.map(r => r.id);
+            await supabase.from('daily_earnings')
+                .update({ settled_at: new Date().toISOString() })
+                .in('id', ids);
+
+            // Send settlement mail
+            try {
+                const msgTotal = Number(userRows.filter(r => r.source === 'message').reduce((s, r) => s + Number(r.amount ?? 0), 0).toFixed(2));
+                const voiceTotal = Number(userRows.filter(r => r.source === 'voice').reduce((s, r) => s + Number(r.amount ?? 0), 0).toFixed(2));
+                const now = new Date();
+                const trTime = new Date(now.getTime() + 3 * 60 * 60 * 1000);
+                const timeStr = trTime.toLocaleString('tr-TR', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', year: 'numeric' });
+                const bodyHtml = renderEarningsAutoSettledHTML(total, msgTotal, voiceTotal, userRows.length, timeStr);
+                await sendSystemMail({
+                    guildId,
+                    userId,
+                    title: 'Kazançlarınız Otomatik Olarak Tanımlandı',
+                    bodyHtml,
+                });
+            } catch (mailErr) {
+                console.warn(`[settlement] mail send failed guild:${guildId} user:${userId}`, mailErr);
+            }
+
+            settledCount += userRows.length;
+        }
+
+        if (settledCount > 0) {
+            console.log(`[settlement] guild:${guildId} settled ${settledCount} rows for ${Object.keys(byUser).length} users`);
+        }
+    } catch (e) {
+        console.error(`[settlement] unexpected error guild:${guildId}`, e);
+    }
 };
 
 module.exports = {

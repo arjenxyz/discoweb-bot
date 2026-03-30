@@ -1,6 +1,7 @@
 const { supabase } = require('./database');
-const { addBalance, upsertMemberDailyStats } = require('./earnings');
+const { addDailyEarning, upsertMemberDailyStats } = require('./earnings');
 const permissionCache = require('./permissionCache');
+const { isVoiceEligible } = require('./antiSpam');
 
 // In-memory join timestamps: key = `${guildId}:${userId}` -> { joinMs, dbId }
 const joinTimestamps = new Map();
@@ -124,6 +125,25 @@ async function handleVoiceStateUpdate(oldState, newState) {
                 return;
             }
 
+            // Anti-spam: check voice eligibility using the old state (before leaving)
+            const voiceCheck = isVoiceEligible(oldState);
+            if (!voiceCheck.allowed) {
+                console.log(`[antiSpam] voice blocked guild:${guildId} user:${userId} reason:${voiceCheck.reason}`);
+                // Still mark DB row as not awarded
+                if (dbId) {
+                    try {
+                        await supabase.from('voice_participation').update({
+                            leave_at: new Date().toISOString(),
+                            duration_seconds: durationSeconds,
+                            awarded: false,
+                            award_amount: 0,
+                            updated_at: new Date().toISOString()
+                        }).eq('id', dbId);
+                    } catch (e) { /* ignore */ }
+                }
+                return;
+            }
+
             const perMinute = Number(serverCfg?.earn_per_voice_minute ?? process.env.PAPEL_PER_VOICE_MINUTE ?? 0.2);
             const tagId = serverCfg?.tag_id ?? null;
             const tagBonusVoice = Number(serverCfg?.tag_bonus_voice ?? 0) || 0;
@@ -172,7 +192,7 @@ async function handleVoiceStateUpdate(oldState, newState) {
 
                 // award and mark DB row
             try {
-                await addBalance(guildId, userId, amount, 'earn_voice', {
+                await addDailyEarning(guildId, userId, 'voice', amount, {
                     channelId: oldChannel,
                     durationSeconds,
                     base: perMinute,
