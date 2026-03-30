@@ -11,8 +11,8 @@ const DEFAULTS = {
     floodWindowMs: 15000,
 };
 
-// Emoji-only regex (unicode emoji, custom Discord emoji, variation selectors, ZWJ sequences)
-const EMOJI_ONLY_RE = /^[\s\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}\u{E0020}-\u{E007F}<:\w+:\d+>]+$/u;
+// Emoji-only regex: unicode emoji blocks + Discord custom emoji (<:name:id> or <a:name:id>)
+const EMOJI_ONLY_RE = /^[\s\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}\u{E0020}-\u{E007F}\u{231A}-\u{23F3}\u{2934}-\u{2935}\u{25AA}-\u{25FE}\u{2B05}-\u{2B55}\u{3030}\u{303D}\u{3297}\u{3299}]+$|^(<a?:\w+:\d+>\s*)+$/u;
 
 function getEntry(guildId, userId) {
     const key = `${guildId}:${userId}`;
