@@ -31,7 +31,7 @@ const getServerConfig = async (guildId) => {
 };
 
 // Ana mesaj işleme fonksiyonu
-const handleMessage = async (message, config, addDailyEarning) => {
+const handleMessage = async (message, config) => {
     // Kendi mesajına cevap vermesin
     if (message.author.bot) return;
 

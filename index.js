@@ -734,7 +734,7 @@ client.once('ready', async () => {
 client.on('messageCreate', async (message) => {
     // Mesaj kazancı işle (bot mesajlarını handleMessage içinde filtreler)
     console.log(`[messageCreate] fired guild:${message.guild?.id} user:${message.author?.id} bot:${message.author?.bot}`);
-    handleMessage(message, config, addDailyEarning).catch(err => console.error('[messageCreate] handleMessage error:', err));
+    handleMessage(message, config).catch(err => console.error('[messageCreate] handleMessage error:', err));
 
     // Bot etiketlendiğinde bilgilendirici embed gönder
     if (message.mentions.has(client.user) && !message.author.bot && !message.mentions.everyone) {
