@@ -224,7 +224,7 @@ const addDailyEarning = async (guildId, userId, source, amount, metadata = {}) =
     const earningDate = getLocalDate(180); // Default timezone offset
     const dateIso = earningDate.toISOString().slice(0, 10);
 
-    const { data: existing } = await supabase
+    const { data: existing, error: selErr } = await supabase
         .from('daily_earnings')
         .select('id,amount')
         .eq('guild_id', guildId)
@@ -233,23 +233,34 @@ const addDailyEarning = async (guildId, userId, source, amount, metadata = {}) =
         .eq('earning_date', dateIso)
         .maybeSingle();
 
+    if (selErr) {
+        console.error(`[earnings] addDailyEarning select FAILED - guild:${guildId} user:${userId}`, selErr.message);
+    }
+
     if (existing?.id) {
         const nextAmount = Number(existing.amount || 0) + amount;
-        await supabase
+        const { error: updErr } = await supabase
             .from('daily_earnings')
             .update({ amount: Number(nextAmount.toFixed(2)), updated_at: new Date().toISOString() })
             .eq('id', existing.id);
-        console.log(`[earnings] addDailyEarning updated - guild:${guildId} user:${userId} source:${source} amount:${nextAmount} date:${dateIso}`);
+        if (updErr) {
+            console.error(`[earnings] addDailyEarning update FAILED - guild:${guildId} user:${userId}`, updErr.message);
+        } else {
+            console.log(`[earnings] addDailyEarning updated - guild:${guildId} user:${userId} source:${source} amount:${nextAmount} date:${dateIso}`);
+        }
     } else {
-        await supabase.from('daily_earnings').insert({
+        const { error: insErr } = await supabase.from('daily_earnings').insert({
             guild_id: guildId,
             user_id: userId,
             source,
             earning_date: dateIso,
             amount: Number(amount.toFixed(2)),
-            metadata
         });
-        console.log(`[earnings] addDailyEarning inserted - guild:${guildId} user:${userId} source:${source} amount:${amount} date:${dateIso}`);
+        if (insErr) {
+            console.error(`[earnings] addDailyEarning insert FAILED - guild:${guildId} user:${userId} source:${source} error:`, insErr.message);
+        } else {
+            console.log(`[earnings] addDailyEarning inserted - guild:${guildId} user:${userId} source:${source} amount:${amount} date:${dateIso}`);
+        }
     }
 };
 
