@@ -1,4 +1,4 @@
-const { supabase } = require('./database');
+﻿const { supabase } = require('./database');
 const { addDailyEarning, upsertMemberDailyStats } = require('./earnings');
 const permissionCache = require('./permissionCache');
 const { isVoiceEligible } = require('./antiSpam');
@@ -8,6 +8,43 @@ const joinTimestamps = new Map();
 
 const MIN_SECONDS = Number(process.env.ACTIVITY_MIN_SECONDS ?? 5);
 
+async function startJoinSession(guildId, userId, channelId, reason = 'join') {
+    const joinMs = Date.now();
+    try {
+        const insert = await supabase.from('voice_participation').insert({
+            guild_id: guildId,
+            user_id: userId,
+            channel_id: channelId,
+            join_at: new Date(joinMs).toISOString(),
+            join_ms: joinMs,
+            created_at: new Date().toISOString(),
+            metadata: { reason }
+        }).select('id').maybeSingle();
+        const dbId = insert?.data?.id ?? null;
+        joinTimestamps.set(`${guildId}:${userId}`, { joinMs, dbId });
+        console.log(`[voiceAward] ${reason.toUpperCase()} guild:${guildId} user:${userId} channel:${channelId} dbId:${dbId}`);
+    } catch (e) {
+        joinTimestamps.set(`${guildId}:${userId}`, { joinMs, dbId: null });
+        console.log(`[voiceAward] ${reason.toUpperCase()} (mem) guild:${guildId} user:${userId} channel:${channelId} — DB persist failed`);
+    }
+}
+
+async function finishParticipation(dbId, durationSeconds, awarded, awardAmount, metadata = {}) {
+    if (!dbId) return;
+    try {
+        await supabase.from('voice_participation').update({
+            leave_at: new Date().toISOString(),
+            duration_seconds: durationSeconds,
+            awarded,
+            award_amount: awardAmount,
+            metadata,
+            updated_at: new Date().toISOString()
+        }).eq('id', dbId);
+    } catch (e) {
+        // ignore
+    }
+}
+
 async function handleVoiceStateUpdate(oldState, newState) {
     try {
         const oldChannel = oldState?.channelId || null;
@@ -15,28 +52,13 @@ async function handleVoiceStateUpdate(oldState, newState) {
         const guildId = (newState?.guild?.id) || (oldState?.guild?.id) || null;
         const userId = (newState?.member?.id) || (oldState?.member?.id) || null;
         if (!guildId || !userId) return;
+        if (newState?.member?.user?.bot || oldState?.member?.user?.bot) return;
+
+        const switchedChannel = Boolean(oldChannel && newChannel && oldChannel !== newChannel);
 
         // join
         if (!oldChannel && newChannel) {
-            const joinMs = Date.now();
-            // persist to DB so we can recover if bot restarts
-            try {
-                const insert = await supabase.from('voice_participation').insert({
-                    guild_id: guildId,
-                    user_id: userId,
-                    channel_id: newChannel,
-                    join_at: new Date(joinMs).toISOString(),
-                    join_ms: joinMs,
-                    created_at: new Date().toISOString()
-                }).select('id').maybeSingle();
-                const dbId = insert?.data?.id ?? null;
-                joinTimestamps.set(`${guildId}:${userId}`, { joinMs, dbId });
-                console.log(`[voiceAward] JOIN guild:${guildId} user:${userId} channel:${newChannel} dbId:${dbId}`);
-            } catch (e) {
-                // fallback to memory-only
-                joinTimestamps.set(`${guildId}:${userId}`, { joinMs, dbId: null });
-                console.log(`[voiceAward] JOIN (mem) guild:${guildId} user:${userId} channel:${newChannel} — DB persist failed`);
-            }
+            await startJoinSession(guildId, userId, newChannel, 'join');
             return;
         }
 
@@ -77,10 +99,12 @@ async function handleVoiceStateUpdate(oldState, newState) {
 
             if (durationSeconds < MIN_SECONDS) {
                 console.log(`[voiceAward] SKIP short session guild:${guildId} user:${userId} durationSec:${durationSeconds} minRequired:${MIN_SECONDS}`);
+                await finishParticipation(dbId, durationSeconds, false, 0, { skip_reason: 'short_session', min_seconds: MIN_SECONDS });
+                if (switchedChannel) await startJoinSession(guildId, userId, newChannel, 'switch_join');
                 return;
             }
 
-            // fetch server config (try discord_id first, fallback to id) - some Supabase setups may not like .or()
+            // fetch server config (try discord_id first, fallback to id)
             let serverCfg = null;
             try {
                 const byDiscord = await supabase
@@ -110,18 +134,32 @@ async function handleVoiceStateUpdate(oldState, newState) {
             const voiceEnabled = serverCfg?.voice_earn_enabled ?? true;
             if (!voiceEnabled) {
                 console.log(`[voiceAward] SKIP voice disabled guild:${guildId}`);
+                await finishParticipation(dbId, durationSeconds, false, 0, { skip_reason: 'voice_disabled' });
+                if (switchedChannel) await startJoinSession(guildId, userId, newChannel, 'switch_join');
                 return;
             }
             if (!cfgVerifyRole) {
                 console.log(`[voiceAward] SKIP no verify role configured guild:${guildId}`);
+                await finishParticipation(dbId, durationSeconds, false, 0, { skip_reason: 'no_verify_role' });
+                if (switchedChannel) await startJoinSession(guildId, userId, newChannel, 'switch_join');
                 return;
             }
 
             // verify member has role
-            const member = oldState?.member ?? newState?.member ?? null;
+            let member = oldState?.member ?? newState?.member ?? null;
+            if (!member) {
+                try {
+                    const guild = newState?.guild ?? oldState?.guild;
+                    if (guild) member = await guild.members.fetch(userId);
+                } catch (e) {
+                    member = null;
+                }
+            }
             const isApproved = Boolean(member?.roles?.cache?.has(cfgVerifyRole));
             if (!isApproved) {
                 console.log(`[voiceAward] SKIP user not verified guild:${guildId} user:${userId}`);
+                await finishParticipation(dbId, durationSeconds, false, 0, { skip_reason: 'user_not_verified', verify_role_id: cfgVerifyRole });
+                if (switchedChannel) await startJoinSession(guildId, userId, newChannel, 'switch_join');
                 return;
             }
 
@@ -129,18 +167,8 @@ async function handleVoiceStateUpdate(oldState, newState) {
             const voiceCheck = isVoiceEligible(oldState);
             if (!voiceCheck.allowed) {
                 console.log(`[antiSpam] voice blocked guild:${guildId} user:${userId} reason:${voiceCheck.reason}`);
-                // Still mark DB row as not awarded
-                if (dbId) {
-                    try {
-                        await supabase.from('voice_participation').update({
-                            leave_at: new Date().toISOString(),
-                            duration_seconds: durationSeconds,
-                            awarded: false,
-                            award_amount: 0,
-                            updated_at: new Date().toISOString()
-                        }).eq('id', dbId);
-                    } catch (e) { /* ignore */ }
-                }
+                await finishParticipation(dbId, durationSeconds, false, 0, { skip_reason: voiceCheck.reason || 'anti_spam_block' });
+                if (switchedChannel) await startJoinSession(guildId, userId, newChannel, 'switch_join');
                 return;
             }
 
@@ -187,10 +215,12 @@ async function handleVoiceStateUpdate(oldState, newState) {
             const amount = Number((minutesFraction * totalPerMinute).toFixed(2));
             if (!amount || amount <= 0) {
                 console.log(`[voiceAward] SKIP zero amount guild:${guildId} user:${userId} amount:${amount}`);
+                await finishParticipation(dbId, durationSeconds, false, 0, { skip_reason: 'zero_amount', computed_amount: amount });
+                if (switchedChannel) await startJoinSession(guildId, userId, newChannel, 'switch_join');
                 return;
             }
 
-                // award and mark DB row
+            // award and mark DB row
             try {
                 await addDailyEarning(guildId, userId, 'voice', amount, {
                     channelId: oldChannel,
@@ -206,24 +236,10 @@ async function handleVoiceStateUpdate(oldState, newState) {
 
                 console.log(`[voiceAward] AWARDED guild:${guildId} user:${userId} amount:${amount} durationSec:${durationSeconds} minutes:${voiceMinutes} base:${perMinute} bonus:${bonus} hasTag:${hasTag} isBooster:${isBooster}`);
 
-                // mark participation row as left/awarded
-                if (dbId) {
-                    try {
-                        await supabase.from('voice_participation').update({
-                            leave_at: new Date().toISOString(),
-                            duration_seconds: durationSeconds,
-                            awarded: true,
-                            award_amount: amount,
-                            updated_at: new Date().toISOString()
-                        }).eq('id', dbId);
-                        console.log(`[voiceAward] DB updated voice_participation id:${dbId} awarded:true`);
-                    } catch (e) {
-                        // ignore DB update failure
-                    }
-                }
+                await finishParticipation(dbId, durationSeconds, true, amount, { source: 'voice_award' });
+                if (dbId) console.log(`[voiceAward] DB updated voice_participation id:${dbId} awarded:true`);
 
-                // update daily/member stats: add voice minutes (rounded down to nearest minute)
-                // Record voice minutes for stats as rounded-up minutes so short joins are visible
+                // update daily/member stats
                 if (voiceMinutes > 0) {
                     try {
                         await upsertMemberDailyStats(guildId, userId, new Date().toISOString().slice(0,10), 0, voiceMinutes);
@@ -231,23 +247,12 @@ async function handleVoiceStateUpdate(oldState, newState) {
                         console.error('[voiceAward] failed upsertMemberDailyStats', e);
                     }
                 }
+                if (switchedChannel) await startJoinSession(guildId, userId, newChannel, 'switch_join');
             } catch (err) {
                 console.error('voiceAward award error:', err);
-                // still attempt to mark DB row as not awarded
-                if (dbId) {
-                    try {
-                        await supabase.from('voice_participation').update({
-                            leave_at: new Date().toISOString(),
-                            duration_seconds: durationSeconds,
-                            awarded: false,
-                            award_amount: 0,
-                            updated_at: new Date().toISOString()
-                        }).eq('id', dbId);
-                        console.log(`[voiceAward] DB updated voice_participation id:${dbId} awarded:false due to error`);
-                    } catch (e) {
-                        // ignore
-                    }
-                }
+                await finishParticipation(dbId, durationSeconds, false, 0, { skip_reason: 'award_error' });
+                if (dbId) console.log(`[voiceAward] DB updated voice_participation id:${dbId} awarded:false due to error`);
+                if (switchedChannel) await startJoinSession(guildId, userId, newChannel, 'switch_join');
             }
         }
     } catch (error) {
