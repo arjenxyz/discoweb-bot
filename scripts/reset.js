@@ -1,6 +1,6 @@
 const { EmbedBuilder, ButtonBuilder, ActionRowBuilder, ButtonStyle } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
-const { supabase } = require('./modules/database');
+const { supabase } = require('../src/core/database');
 
 const resetStates = new Map();
 
