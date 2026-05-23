@@ -401,6 +401,79 @@ function startBotApi({ supabase, client, port = 3000 }) {
     }
   });
 
+  app.post('/api/broadcast-system', async (req, res) => {
+    try {
+      if (!ensureBotApiKey(req, res)) return;
+
+      const { title, content, color } = req.body;
+      if (!title || !content) return res.status(400).json({ error: 'missing_fields' });
+
+      const { supabase } = require('../core/database');
+
+      // Fetch all system channels
+      const { data: channels } = await supabase
+        .from('bot_log_channels')
+        .select('guild_id, channel_id')
+        .eq('channel_type', 'system')
+        .eq('is_active', true);
+
+      if (!channels || channels.length === 0) {
+        return res.json({ success: true, successCount: 0, failCount: 0 });
+      }
+
+      const { EmbedBuilder } = require('discord.js');
+      
+      let successCount = 0;
+      let failCount = 0;
+
+      // Extract @everyone from content if exists to ping
+      const hasEveryone = content.includes('@everyone');
+      const cleanContent = content.replace('@everyone', '').trim();
+
+      const embed = new EmbedBuilder()
+        .setColor(color || '#5865F2')
+        .setTitle(title)
+        .setDescription(cleanContent)
+        .setTimestamp()
+        .setAuthor({ name: 'DiscoWeb Developer', iconURL: client.user.displayAvatarURL() });
+
+      // Send to all channels asynchronously but controlled
+      for (const ch of channels) {
+        try {
+          const guild = client.guilds.cache.get(ch.guild_id);
+          if (!guild) {
+             failCount++;
+             continue;
+          }
+          const discordChannel = guild.channels.cache.get(ch.channel_id);
+          if (!discordChannel) {
+             failCount++;
+             continue;
+          }
+
+          const messageOptions = { embeds: [embed] };
+          if (hasEveryone) {
+            messageOptions.content = '@everyone';
+          }
+          
+          await discordChannel.send(messageOptions);
+          successCount++;
+        } catch (e) {
+          console.error(`Broadcast failed for guild ${ch.guild_id}:`, e.message);
+          failCount++;
+        }
+        
+        // Slight delay to prevent rate limit
+        await new Promise(r => setTimeout(r, 100));
+      }
+
+      res.json({ success: true, successCount, failCount });
+    } catch (err) {
+      console.error('broadcast-system error:', err);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
   app.listen(port, '0.0.0.0', () => {
     console.log(`🌐 Bot API server listening on port ${port}`);
   });
