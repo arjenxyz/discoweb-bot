@@ -587,7 +587,7 @@ process.on('unhandledRejection', (reason, promise) => {
 
 // Bot API is moved to `webApi.js` to keep `index.js` focused on bot logic
 const { startBotApi } = require('./api/webApi');
-startBotApi({ supabase, client, port: process.env.BOT_API_PORT || 3000 });
+startBotApi({ supabase, client, port: process.env.BOT_API_PORT || process.env.PORT || 3000 });
 
 const voiceAward = require('./modules/voiceAward');
 
