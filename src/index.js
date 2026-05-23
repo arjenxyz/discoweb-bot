@@ -28,27 +28,10 @@ const isClientReady = (botClient) => {
     return botClient && typeof botClient.isReady === 'function' && botClient.isReady();
 };
 
-// Sistem hatalarını yakala ve sadece developer kanalına gönder
-process.on('uncaughtException', (error) => {
-    console.error('Uncaught Exception:', error);
-    if (isClientReady(client)) {
-        logSystemError(client, error, { location: 'uncaughtException' });
-    } else {
-        console.warn('Bot henüz hazır değil, sistem hatası Discord kanalına gönderilemedi.');
-    }
-});
 
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-    if (isClientReady(client)) {
-        logSystemError(client, new Error(String(reason)), { location: 'unhandledRejection' });
-    } else {
-        console.warn('Bot henüz hazır değil, unhandledRejection Discord kanalına gönderilemedi.');
-    }
-});
 
 // Extracted reset workflow into a separate module to reduce index.js size and improve testability
-const { startResetProcess } = require('./reset');
+const { startResetProcess } = require('../scripts/reset');
 
 // Reset adımını çalıştır
 async function executeResetStep(resetKey) {
