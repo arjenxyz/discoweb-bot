@@ -228,10 +228,18 @@ function startBotApi({ supabase, client, port = 3000 }) {
       if (!guildId) return res.status(400).json({ error: 'missing_guildId' });
       
       const targetId = targetGuildId || guildId;
-      const targetGuild = client.guilds.cache.get(targetId);
+      let targetGuild = client.guilds.cache.get(targetId);
       
       if (!targetGuild) {
-        return res.status(404).json({ error: 'Bot hedef sunucuda bulunamadı. Lütfen botu o sunucuya ekleyin.' });
+        try {
+          targetGuild = await client.guilds.fetch(targetId);
+        } catch (fetchErr) {
+          console.error(`Guild fetch failed for ${targetId}:`, fetchErr.message);
+        }
+      }
+      
+      if (!targetGuild) {
+        return res.status(404).json({ error: 'Bot hedef sunucuda bulunamadı. Lütfen botu o sunucuya ekleyin veya botun tamamen açılmasını bekleyin.' });
       }
 
       const { supabase } = require('../core/database');
