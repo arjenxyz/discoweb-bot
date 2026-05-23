@@ -244,19 +244,18 @@ function startBotApi({ supabase, client, port = 3000 }) {
 
       const { supabase } = require('../core/database');
 
-      // Eski kanalları bul ve temizle
+      // Eski kanalları bul ve temizle (tüm türleri)
       const { data: oldChannels } = await supabase
         .from('bot_log_channels')
         .select('channel_id')
-        .eq('guild_id', guildId)
-        .eq('channel_type', 'admin_log');
+        .eq('guild_id', guildId);
         
       if (oldChannels && oldChannels.length > 0) {
         for (const old of oldChannels) {
            const oldCh = client.channels.cache.get(old.channel_id);
            if (oldCh) await oldCh.delete('Log sunucusu veya kanalı değiştirildi').catch(()=>null);
         }
-        await supabase.from('bot_log_channels').delete().eq('guild_id', guildId).eq('channel_type', 'admin_log');
+        await supabase.from('bot_log_channels').delete().eq('guild_id', guildId);
       }
 
       // Yeni kategori ve kanal aç
@@ -268,23 +267,30 @@ function startBotApi({ supabase, client, port = 3000 }) {
          return null;
       });
 
-      const adminLogChannel = await targetGuild.channels.create({
-          name: 'admin-log',
-          type: 0, // Text
-          parent: category ? category.id : undefined
-      }).catch(err => null);
+      const createLogChannel = async (name) => {
+        return await targetGuild.channels.create({
+            name,
+            type: 0, // Text
+            parent: category ? category.id : undefined
+        }).catch(() => null);
+      };
 
-      if (!adminLogChannel) {
-        return res.status(500).json({ error: 'Kanal oluşturulamadı. Botun "Kanal Yönetimi" yetkisine sahip olduğundan emin olun.' });
+      const adminLogChannel = await createLogChannel('admin-log');
+      const magazaLogChannel = await createLogChannel('magaza-log');
+      const cuzdanLogChannel = await createLogChannel('cuzdan-log');
+      const sistemLogChannel = await createLogChannel('sistem-log');
+
+      if (!adminLogChannel || !magazaLogChannel || !cuzdanLogChannel || !sistemLogChannel) {
+        return res.status(500).json({ error: 'Kanallar oluşturulamadı. Botun "Kanal Yönetimi" yetkisine sahip olduğundan emin olun.' });
       }
 
       // Veritabanına kaydet
-      await supabase.from('bot_log_channels').insert({
-          guild_id: guildId,
-          channel_type: 'admin_log',
-          channel_id: adminLogChannel.id,
-          is_active: true
-      });
+      await supabase.from('bot_log_channels').insert([
+          { guild_id: guildId, channel_type: 'admin_log', channel_id: adminLogChannel.id, is_active: true },
+          { guild_id: guildId, channel_type: 'store', channel_id: magazaLogChannel.id, is_active: true },
+          { guild_id: guildId, channel_type: 'wallet', channel_id: cuzdanLogChannel.id, is_active: true },
+          { guild_id: guildId, channel_type: 'system', channel_id: sistemLogChannel.id, is_active: true }
+      ]);
 
       const { clearCache } = require('../utils/logChannels');
       clearCache();
