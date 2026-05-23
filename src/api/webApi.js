@@ -275,21 +275,21 @@ function startBotApi({ supabase, client, port = 3000 }) {
         }).catch(() => null);
       };
 
+      const developerDuyuruChannel = await createLogChannel('developer-duyuru');
       const adminLogChannel = await createLogChannel('admin-log');
       const magazaLogChannel = await createLogChannel('magaza-log');
       const cuzdanLogChannel = await createLogChannel('cuzdan-log');
-      const sistemLogChannel = await createLogChannel('sistem-log');
 
-      if (!adminLogChannel || !magazaLogChannel || !cuzdanLogChannel || !sistemLogChannel) {
+      if (!adminLogChannel || !magazaLogChannel || !cuzdanLogChannel || !developerDuyuruChannel) {
         return res.status(500).json({ error: 'Kanallar oluşturulamadı. Botun "Kanal Yönetimi" yetkisine sahip olduğundan emin olun.' });
       }
 
       // Veritabanına kaydet
       await supabase.from('bot_log_channels').insert([
+          { guild_id: guildId, channel_type: 'system', channel_id: developerDuyuruChannel.id, is_active: true },
           { guild_id: guildId, channel_type: 'admin_log', channel_id: adminLogChannel.id, is_active: true },
           { guild_id: guildId, channel_type: 'store', channel_id: magazaLogChannel.id, is_active: true },
-          { guild_id: guildId, channel_type: 'wallet', channel_id: cuzdanLogChannel.id, is_active: true },
-          { guild_id: guildId, channel_type: 'system', channel_id: sistemLogChannel.id, is_active: true }
+          { guild_id: guildId, channel_type: 'wallet', channel_id: cuzdanLogChannel.id, is_active: true }
       ]);
 
       const { clearCache } = require('../utils/logChannels');
