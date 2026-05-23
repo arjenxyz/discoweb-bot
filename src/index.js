@@ -589,7 +589,7 @@ process.on('unhandledRejection', (reason, promise) => {
 const { startBotApi } = require('./api/webApi');
 startBotApi({ supabase, client, port: process.env.BOT_API_PORT || process.env.PORT || 3000 });
 
-const voiceAward = require('./modules/voiceAward');
+const activity = require('./services/activity');
 
 
 // registerSlashCommands removed
@@ -655,7 +655,7 @@ client.once('ready', async () => {
     // Voice earnings are now awarded on disconnect; listen to voiceStateUpdate
     client.on('voiceStateUpdate', async (oldState, newState) => {
         try {
-            await voiceAward.handleVoiceStateUpdate(oldState, newState);
+            await activity.handleVoiceStateUpdate(oldState, newState);
         } catch (err) {
             console.error('voiceStateUpdate handler error:', err);
         }
