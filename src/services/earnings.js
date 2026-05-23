@@ -1,9 +1,9 @@
 // modules/earnings.js
-const { supabase, getGuild, getLocalDate } = require('./database');
+const { supabase, getGuild, getLocalDate } = require('../core/database');
 const { EmbedBuilder } = require('discord.js');
 const { isVoiceEligible } = require('./antiSpam');
-const { sendSystemMail } = require('./notifications');
-const { renderEarningsAutoSettledHTML } = require('./mailTemplates');
+const { sendSystemMail } = require('../utils/notifications');
+const { renderEarningsAutoSettledHTML } = require('../utils/mailTemplates');
 
 // Log gönderme fonksiyonu
 async function sendWalletLog(guildId, embed) {
@@ -169,7 +169,7 @@ const processVoiceEarnings = async (client, guildId, requiredRoleId, earnPerVoic
                         if (entry.primaryGuildId) memberPrimaryGuildId = entry.primaryGuildId;
                     } else {
                         // fallback to legacy detection and seed cache
-                        const { getMemberServerTagId, getMemberPrimaryGuildId } = require('./memberTag');
+                        const { getMemberServerTagId, getMemberPrimaryGuildId } = require('../utils/memberTag');
                         memberTagId = getMemberServerTagId(member);
                         memberPrimaryGuildId = getMemberPrimaryGuildId(member);
                         hasTag = Boolean(tagId && (String(memberPrimaryGuildId) === String(tagId) || String(memberTagId) === String(tagId)));
@@ -179,7 +179,7 @@ const processVoiceEarnings = async (client, guildId, requiredRoleId, earnPerVoic
                     }
                 } catch (e) {
                     console.warn('permissionCache lookup failed, falling back', e);
-                    const { getMemberServerTagId, getMemberPrimaryGuildId } = require('./memberTag');
+                    const { getMemberServerTagId, getMemberPrimaryGuildId } = require('../utils/memberTag');
                     memberTagId = getMemberServerTagId(member);
                     memberPrimaryGuildId = getMemberPrimaryGuildId(member);
                     hasTag = Boolean(tagId && (String(memberPrimaryGuildId) === String(tagId) || String(memberTagId) === String(tagId)));

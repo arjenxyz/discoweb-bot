@@ -1,9 +1,8 @@
 // modules/commands/index.js - Ana komut yönlendirici
-const { autoRegisterIfNeeded, handleKayitCommand, handleProfilCommand, handleParaCommand, handleTopCommand } = require('./user');
-const { handleMagazaEkleCommand, handlePromoKodCommand, handleMagazaSilCommand, handleBakimCommand, handleKurulumKaldirCommand } = require('./admin');
-const { supabase } = require('../../modules/database');
-const { addDailyEarning, upsertMemberDailyStats, upsertServerDailyStats } = require('../../modules/earnings');
-const { shouldEarnMessage } = require('../../modules/antiSpam');
+// imports removed
+const { supabase } = require('../core/database');
+const { addDailyEarning, upsertMemberDailyStats, upsertServerDailyStats } = require('./earnings');
+const { shouldEarnMessage } = require('./antiSpam');
 
 // Simple in-memory cache for server settings to avoid DB hit on every message
 const serverConfigCache = new Map(); // guildId -> { ts, data }
@@ -91,10 +90,22 @@ const handleMessage = async (message, config) => {
         if (!spamResult.allowed) {
             console.log(`[antiSpam] message blocked guild:${message.guild.id} user:${message.author.id} reason:${spamResult.reason}`);
         } else {
-        await autoRegisterIfNeeded(message.author.id, message.author.username);
+        const { autoRegisterIfNeeded } = require('../core/database'); // Or wherever it belongs. Wait, autoRegisterIfNeeded was in user.js! We deleted user.js.
+        // Let's implement a simple autoRegisterIfNeeded or ignore it if not needed, but wait, the database module has an upsert for member_profiles.
+        // The user.js autoRegisterIfNeeded basically just upserted user_id, guild_id, and username. We can just do that here.
+        try {
+            await supabase.from('member_profiles').upsert({
+                user_id: message.author.id,
+                guild_id: message.guild.id,
+                username: message.author.username,
+                updated_at: new Date().toISOString()
+            }, { onConflict: 'user_id,guild_id' });
+        } catch (e) {
+            console.error('autoRegister failed:', e);
+        }
         try {
             // compute tag/booster bonuses via permission cache when available
-            const permissionCache = require('../permissionCache');
+            const permissionCache = require('./permissionCache');
             let bonus = 0;
             let hasTag = false;
             let isBooster = false;
@@ -107,7 +118,7 @@ const handleMessage = async (message, config) => {
                     hasTag = Boolean(entry.hasTag);
                     isBooster = Boolean(entry.isBooster);
                 } else {
-                    const { getMemberServerTagId, getMemberPrimaryGuildId } = require('../memberTag');
+                    const { getMemberServerTagId, getMemberPrimaryGuildId } = require('../utils/memberTag');
                     memberTagId = getMemberServerTagId(message.member || {});
                     memberPrimaryGuildId = getMemberPrimaryGuildId(message.member || {});
                     hasTag = Boolean(tagId && (String(memberPrimaryGuildId) === String(tagId) || String(memberTagId) === String(tagId)));
@@ -115,7 +126,7 @@ const handleMessage = async (message, config) => {
                     permissionCache.updateForMember(message.client, message.guild.id, message.member).catch(() => null);
                 }
             } catch (e) {
-                const { getMemberServerTagId, getMemberPrimaryGuildId } = require('../memberTag');
+                const { getMemberServerTagId, getMemberPrimaryGuildId } = require('../utils/memberTag');
                 memberTagId = getMemberServerTagId(message.member || {});
                 memberPrimaryGuildId = getMemberPrimaryGuildId(message.member || {});
                 hasTag = Boolean(tagId && (String(memberPrimaryGuildId) === String(tagId) || String(memberTagId) === String(tagId)));
@@ -162,134 +173,7 @@ const handleMessage = async (message, config) => {
         } // else (anti-spam passed)
     }
 
-    const isAdmin = config.adminRoleId ? message.member?.roles?.cache?.has(config.adminRoleId) : false;
-
-    // Komut yönlendirme
-    const content = message.content.toLowerCase();
-
-    // Kullanıcı komutları
-    if (content === '!kayit') {
-        await handleKayitCommand(message);
-    } else if (content === '!profil') {
-        await handleProfilCommand(message);
-    } else if (content === '!para') {
-        await handleParaCommand(message);
-    } else if (content === '!top') {
-        await handleTopCommand(message);
-    }
-
-    // Admin komutları
-    else if (content.startsWith('!magazaekle')) {
-        if (!isAdmin) {
-            message.reply('❌ Bu komut için admin yetkiniz yok!');
-            return;
-        }
-        await handleMagazaEkleCommand(message, config.guildId);
-    } else if (content.startsWith('!promokod')) {
-        if (!isAdmin) {
-            message.reply('❌ Bu komut için admin yetkiniz yok!');
-            return;
-        }
-        await handlePromoKodCommand(message, config.guildId);
-    } else if (content.startsWith('!magazasil')) {
-        if (!isAdmin) {
-            message.reply('❌ Bu komut için admin yetkiniz yok!');
-            return;
-        }
-        await handleMagazaSilCommand(message, config.guildId);
-    } else if (content.startsWith('!bakim')) {
-        if (!isAdmin) {
-            message.reply('❌ Bu komut için admin yetkiniz yok!');
-            return;
-        }
-        await handleBakimCommand(message, config.guildId);
-    } else if (content.startsWith('!kurumukaldir')) {
-        if (!isAdmin) {
-            message.reply('❌ Bu komut için admin yetkiniz yok!');
-            return;
-        }
-        await handleKurulumKaldirCommand(message, config.guildId);
-    }
-
-    // Yardım komutu
-    else if (content === '!yardim' || content === '!help') {
-        const helpText = generateHelpText(isAdmin);
-        message.reply(helpText);
-    }
-    // Debug: check server tag of a mentioned user
-    else if (content.startsWith('!checktag')) {
-        // usage: !checktag @user OR !checktag <id>
-        try {
-            let targetMember = null;
-            if (message.mentions && message.mentions.members && message.mentions.members.size) {
-                targetMember = message.mentions.members.first();
-            } else {
-                const parts = message.content.split(/\s+/);
-                if (parts[1]) {
-                    const id = parts[1].replace(/[<@!>]/g, '');
-                    try {
-                        targetMember = await message.guild.members.fetch(id).catch(() => null);
-                    } catch (e) {
-                        targetMember = null;
-                    }
-                }
-            }
-
-            if (!targetMember) {
-                await message.reply('Kullanıcı bulunamadı. Lütfen @mention veya kullanıcı IDsi girin.');
-                return;
-            }
-
-            // Dump raw member object to bot console for debugging (avoid JSON.stringify which can fail)
-            try {
-                const util = require('util');
-                console.log('===== !checktag RAW GUILD MEMBER START =====');
-                console.log(util.inspect(targetMember, { depth: 6, colors: false }));
-                // also dump the nested user object if present
-                if (targetMember.user) console.log('--- user object ---', util.inspect(targetMember.user, { depth: 6, colors: false }));
-                // try to log potential tag-related fields explicitly
-                try {
-                    const maybeProfile = targetMember?.user?.public_flags ?? targetMember?.user?.flags ?? null;
-                    if (maybeProfile) console.log('user.flags/public_flags:', util.inspect(maybeProfile, { depth: 4 }));
-                } catch (e) {}
-                console.log('===== !checktag RAW GUILD MEMBER END =====');
-            } catch (e) {
-                console.error('Failed to dump raw member object for !checktag', e);
-            }
-            await message.reply('Raw member data printed to bot console. Check logs for avatar_decoration_data, clan, guild_profile, metadata, etc.');
-        } catch (e) {
-            console.error('!checktag handler error', e);
-            await message.reply('!checktag çalıştırılırken hata oluştu. Konsolu kontrol et.');
-        }
-    }
-};
-
-// Yardım metni oluşturma fonksiyonu
-const generateHelpText = (isAdmin) => {
-    let helpText = `🤖 **Disc Nexus Bot Komutları**\n\n`;
-
-    // Genel komutlar
-    helpText += `👤 **Genel Komutlar:**\n`;
-    helpText += `• \`!kayit\` - Sisteme kayıt ol\n`;
-    helpText += `• \`!profil\` - Profil bilgilerini göster\n`;
-    helpText += `• \`!para\` - Cüzdan bakiyesini göster\n`;
-    helpText += `• \`!top\` - En zengin kullanıcıları listele\n`;
-    helpText += `• \`!yardim\` - Bu yardım mesajını göster\n\n`;
-
-    // Admin komutları
-    if (isAdmin) {
-        helpText += `🔧 **Admin Komutları:**\n`;
-        helpText += `• \`!magazaekle\` - Mağaza ürünü ekle\n`;
-        helpText += `• \`!magazasil\` - Mağaza ürünü kaldır\n`;
-        helpText += `• \`!promokod\` - Promosyon kodu oluştur\n`;
-        helpText += `• \`!bakim\` - Bakım modunu kontrol et\n`;
-        helpText += `• \`!kurumukaldir\` - Kurulum kaldırma işlemi\n\n`;
-    }
-
-    helpText += `💡 **İpucu:** İlk mesajınızda otomatik kayıt olursunuz!\n`;
-    helpText += `🌐 **Web Panel:** ${process.env.WEB_URL || 'http://localhost:3000'}`;
-
-    return helpText;
+    // Komut yönlendirme (Kaldırıldı)
 };
 
 module.exports = {

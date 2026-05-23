@@ -219,6 +219,142 @@ function startBotApi({ supabase, client, port = 3000 }) {
     }
   });
 
+  // Activity SDK ve Web Panel için Log Sunucusu Kurulumu
+  app.post('/api/setup-server-logs', async (req, res) => {
+    try {
+      if (!ensureBotApiKey(req, res)) return;
+
+      const { guildId, targetGuildId } = req.body;
+      if (!guildId) return res.status(400).json({ error: 'missing_guildId' });
+      
+      const targetId = targetGuildId || guildId;
+      const targetGuild = client.guilds.cache.get(targetId);
+      
+      if (!targetGuild) {
+        return res.status(404).json({ error: 'Bot hedef sunucuda bulunamadı. Lütfen botu o sunucuya ekleyin.' });
+      }
+
+      const { supabase } = require('../core/database');
+
+      // Eski kanalları bul ve temizle
+      const { data: oldChannels } = await supabase
+        .from('bot_log_channels')
+        .select('channel_id')
+        .eq('guild_id', guildId)
+        .eq('channel_type', 'admin_log');
+        
+      if (oldChannels && oldChannels.length > 0) {
+        for (const old of oldChannels) {
+           const oldCh = client.channels.cache.get(old.channel_id);
+           if (oldCh) await oldCh.delete('Log sunucusu veya kanalı değiştirildi').catch(()=>null);
+        }
+        await supabase.from('bot_log_channels').delete().eq('guild_id', guildId).eq('channel_type', 'admin_log');
+      }
+
+      // Yeni kategori ve kanal aç
+      const category = await targetGuild.channels.create({
+          name: '💠 DiscoWeb Logs',
+          type: 4 // Category
+      }).catch(err => {
+         console.error('Kategori acma hatasi:', err);
+         return null;
+      });
+
+      const adminLogChannel = await targetGuild.channels.create({
+          name: 'admin-log',
+          type: 0, // Text
+          parent: category ? category.id : undefined
+      }).catch(err => null);
+
+      if (!adminLogChannel) {
+        return res.status(500).json({ error: 'Kanal oluşturulamadı. Botun "Kanal Yönetimi" yetkisine sahip olduğundan emin olun.' });
+      }
+
+      // Veritabanına kaydet
+      await supabase.from('bot_log_channels').insert({
+          guild_id: guildId,
+          channel_type: 'admin_log',
+          channel_id: adminLogChannel.id,
+          is_active: true
+      });
+
+      const { clearCache } = require('../utils/logChannels');
+      clearCache();
+
+      res.json({ success: true, channelId: adminLogChannel.id });
+    } catch (err) {
+      console.error('setup-server-logs error:', err);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  // Activity SDK Kritik İşlem Loglaması
+  app.post('/api/log-sdk-activity', async (req, res) => {
+    try {
+      if (!ensureBotApiKey(req, res)) return;
+
+      const { guildId, type, userId, metadata } = req.body;
+      if (!guildId || !type) return res.status(400).json({ error: 'missing_fields' });
+
+      const { supabase } = require('../core/database');
+
+      const { data: logChannel } = await supabase
+        .from('bot_log_channels')
+        .select('channel_id')
+        .eq('guild_id', guildId)
+        .eq('channel_type', 'admin_log')
+        .eq('is_active', true)
+        .maybeSingle();
+
+      if (!logChannel) return res.status(404).json({ error: 'admin_log channel not found' });
+
+      const channel = client.channels.cache.get(logChannel.channel_id);
+      if (!channel) return res.status(404).json({ error: 'discord channel not found' });
+
+      const { EmbedBuilder } = require('discord.js');
+      const embed = new EmbedBuilder().setTimestamp();
+      let color = '#2b2d31';
+      let title = 'Sistem İşlemi';
+      let desc = userId ? `<@${userId}> bir işlem yaptı.` : 'Sistem tarafından bir işlem gerçekleştirildi.';
+
+      switch (type) {
+          case 'registration':
+              color = '#43b581'; // Green
+              title = '✅ Yeni Activity Kaydı';
+              desc = `<@${userId}> activity sözleşmesini onaylayarak sisteme kayıt oldu.`;
+              break;
+          case 'transfer':
+              color = '#faa61a'; // Yellow
+              title = '💸 Para Transferi';
+              desc = `<@${userId}> adlı kullanıcı <@${metadata?.targetId}> kullanıcısına **${metadata?.amount} Papel** gönderdi.`;
+              break;
+          case 'purchase':
+              color = '#f04747'; // Red
+              title = '🛒 Mağaza Satın Alımı';
+              desc = `<@${userId}> mağazadan **${metadata?.itemName}** adlı ürünü **${metadata?.price} Papel** karşılığında satın aldı.`;
+              break;
+          case 'tag_claim':
+              color = '#7289da'; // Blurple
+              title = '🏷️ Tag Alındı';
+              desc = `<@${userId}> sunucu tag'ini adına ekledi ve bonus kazanımları aktif oldu.`;
+              break;
+          case 'boost_start':
+              color = '#f47fff'; // Pink
+              title = '🚀 Sunucu Takviyesi';
+              desc = `<@${userId}> sunucuya takviye (boost) bastı!`;
+              break;
+      }
+
+      embed.setColor(color).setTitle(title).setDescription(desc);
+      await channel.send({ embeds: [embed] });
+      
+      res.json({ success: true });
+    } catch (err) {
+      console.error('log-sdk-activity error:', err);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
   // Invalidate server config cache endpoint
   // Expects { guildId: string } in body. If BOT_API_KEY is set, requires Authorization: Bearer <key>
   app.post('/api/invalidate-config', async (req, res) => {
@@ -236,7 +372,7 @@ function startBotApi({ supabase, client, port = 3000 }) {
 
       // try to clear cache via commands module
       try {
-        const commands = require('./modules/commands');
+        const commands = require('../services/messageProcessor');
         if (typeof commands.invalidateServerConfig === 'function') {
           commands.invalidateServerConfig(guildId);
         }

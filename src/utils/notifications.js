@@ -1,4 +1,4 @@
-const { supabase } = require('./database');
+const { supabase } = require('../core/database');
 
 async function sendSystemMail({ guildId, userId, title, bodyHtml, authorName = 'Foxord' }) {
   try {

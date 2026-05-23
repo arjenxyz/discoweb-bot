@@ -1,6 +1,6 @@
 // modules/store.js
-const { supabase, getGuild, getLocalDateStartIso } = require('./database');
-const { handleError, ERROR_CATEGORIES } = require('./errorHandler');
+const { supabase, getGuild, getLocalDateStartIso } = require('../core/database');
+const { handleError, ERROR_CATEGORIES } = require('../core/errorHandler');
 const { EmbedBuilder } = require('discord.js');
 
 // Render an HTML delivery-failure notification using inline CSS (Foxord-styled)

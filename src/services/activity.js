@@ -1,4 +1,4 @@
-const { supabase } = require('./database');
+const { supabase } = require('../core/database');
 const { addBalance } = require('./earnings');
 
 // Minimum seconds required to count participation
@@ -77,13 +77,13 @@ async function handleVoiceStateUpdate(oldState, newState) {
                         if (!voiceEnabled) {
                             // skip awarding if server disabled voice earnings
                             await supabase.from('activity_participation').update({ awarded: false }).eq('id', participation.id);
-                            continue;
+                            return;
                         }
 
                         // If server hasn't set a verify role, do not award anyone
                         if (!verifyRole) {
                             await supabase.from('activity_participation').update({ awarded: false }).eq('id', participation.id);
-                            continue;
+                            return;
                         }
 
                         // Verify member has role
@@ -91,7 +91,7 @@ async function handleVoiceStateUpdate(oldState, newState) {
                         const isApproved = Boolean(member?.roles?.cache?.has(verifyRole));
                         if (!isApproved) {
                             await supabase.from('activity_participation').update({ awarded: false }).eq('id', participation.id);
-                            continue;
+                            return;
                         }
 
                         // Award immediately

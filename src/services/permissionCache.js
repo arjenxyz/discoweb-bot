@@ -1,5 +1,5 @@
-const { supabase } = require('./database');
-const { getMemberServerTagId, getMemberPrimaryGuildId } = require('./memberTag');
+const { supabase } = require('../core/database');
+const { getMemberServerTagId, getMemberPrimaryGuildId } = require('../utils/memberTag');
 
 // Simple in-memory permission cache. Keyed by `${guildId}:${userId}`.
 // Stores: { hasTag, isBooster, roles:Set, memberTagId, primaryGuildId, lastUpdatedMs }
