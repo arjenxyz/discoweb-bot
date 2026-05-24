@@ -23,6 +23,7 @@ const mailTemplates = require('./utils/mailTemplates');
 const { sendSystemMail } = require('./utils/notifications');
 const { formatUser, truncate } = require('./core/logger');
 const { logToChannel, clearCache: clearLogCache } = require('./utils/logChannels');
+const quizCron = require('./utils/quizCron');
 
 const isClientReady = (botClient) => {
     return botClient && typeof botClient.isReady === 'function' && botClient.isReady();
@@ -678,6 +679,9 @@ client.once('ready', async () => {
 
     // Anti-spam cleanup every 5 minutes
     setInterval(() => antiSpam.cleanup(), 5 * 60 * 1000);
+
+    // Quiz Event cron — web tarafındaki /api/cron/quiz-tick ve /api/cron/quiz-payout'u tetikler
+    quizCron.start();
 });
 
 // Mesaj Geldiğinde (Prefix komutları için)
