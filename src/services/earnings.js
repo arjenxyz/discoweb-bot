@@ -226,7 +226,7 @@ const addDailyEarning = async (guildId, userId, source, amount, metadata = {}) =
 
     const { data: existing, error: selErr } = await supabase
         .from('daily_earnings')
-        .select('id,amount')
+        .select('id,amount,settled_at')
         .eq('guild_id', guildId)
         .eq('user_id', userId)
         .eq('source', source)
@@ -238,15 +238,34 @@ const addDailyEarning = async (guildId, userId, source, amount, metadata = {}) =
     }
 
     if (existing?.id) {
-        const nextAmount = Number(existing.amount || 0) + amount;
-        const { error: updErr } = await supabase
-            .from('daily_earnings')
-            .update({ amount: Number(nextAmount.toFixed(2)), updated_at: new Date().toISOString() })
-            .eq('id', existing.id);
-        if (updErr) {
-            console.error(`[earnings] addDailyEarning update FAILED - guild:${guildId} user:${userId}`, updErr.message);
+        if (existing.settled_at) {
+            // Kullanıcı bugünkü kazancını zaten aldı: sıfırdan yeni biriken oluştur.
+            // settled_at temizlenerek miktar sadece claim sonrası kazanılan kadar olur.
+            const { error: updErr } = await supabase
+                .from('daily_earnings')
+                .update({
+                    amount: Number(amount.toFixed(2)),
+                    settled_at: null,
+                    updated_at: new Date().toISOString(),
+                })
+                .eq('id', existing.id);
+            if (updErr) {
+                console.error(`[earnings] addDailyEarning reopen FAILED - guild:${guildId} user:${userId}`, updErr.message);
+            } else {
+                console.log(`[earnings] addDailyEarning reopened (post-claim) - guild:${guildId} user:${userId} source:${source} amount:${amount} date:${dateIso}`);
+            }
         } else {
-            console.log(`[earnings] addDailyEarning updated - guild:${guildId} user:${userId} source:${source} amount:${nextAmount} date:${dateIso}`);
+            // Normal biriktirme: mevcut unsettled satıra ekle
+            const nextAmount = Number(existing.amount || 0) + amount;
+            const { error: updErr } = await supabase
+                .from('daily_earnings')
+                .update({ amount: Number(nextAmount.toFixed(2)), updated_at: new Date().toISOString() })
+                .eq('id', existing.id);
+            if (updErr) {
+                console.error(`[earnings] addDailyEarning update FAILED - guild:${guildId} user:${userId}`, updErr.message);
+            } else {
+                console.log(`[earnings] addDailyEarning updated - guild:${guildId} user:${userId} source:${source} amount:${nextAmount} date:${dateIso}`);
+            }
         }
     } else {
         const { error: insErr } = await supabase.from('daily_earnings').insert({
