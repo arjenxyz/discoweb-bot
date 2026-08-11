@@ -146,13 +146,29 @@ async function flushEarnBuffer(reason = 'manual') {
 
   try {
     for (const entry of entries) {
+      // Critical write only — requeue ONLY if this fails.
+      // Side-effect failures must NOT requeue: that double-credits earnings/message counts.
       try {
         await addDailyEarning(entry.guildId, entry.userId, entry.source, entry.amount, {
           ...(entry.meta || {}),
           buffered: true,
           flushReason: reason,
         });
+      } catch (err) {
+        console.error('[earnBuffer] entry earn failed (requeued)', err.message);
+        const key = entryKey(entry.guildId, entry.userId, entry.source);
+        const existing = buffer.get(key);
+        if (existing) {
+          existing.amount = Number((existing.amount + entry.amount).toFixed(2));
+          existing.messageCount += entry.messageCount;
+          existing.voiceMinutes += entry.voiceMinutes;
+        } else {
+          buffer.set(key, entry);
+        }
+        continue;
+      }
 
+      try {
         const statDate = new Date().toISOString().slice(0, 10);
         if (entry.messageCount > 0) {
           await upsertMemberDailyStats(entry.guildId, entry.userId, statDate, entry.messageCount, 0);
@@ -172,7 +188,7 @@ async function flushEarnBuffer(reason = 'manual') {
         const profileKey = `${entry.guildId}:${entry.userId}`;
         if (entry.username && !profileSeen.has(profileKey)) {
           profileSeen.add(profileKey);
-          await supabase
+          const { error: profileErr } = await supabase
             .from('member_profiles')
             .upsert(
               {
@@ -182,56 +198,56 @@ async function flushEarnBuffer(reason = 'manual') {
                 updated_at: new Date().toISOString(),
               },
               { onConflict: 'user_id,guild_id' }
-            )
-            .catch(() => null);
+            );
+          if (profileErr) {
+            console.warn('[earnBuffer] profile upsert skipped', profileErr.message);
+          }
         }
 
         if (entry.hasTag && !tagSeen.has(profileKey)) {
           tagSeen.add(profileKey);
-          try {
-            const { data: prof } = await supabase
-              .from('member_profiles')
-              .select('tag_granted_at')
-              .eq('guild_id', entry.guildId)
-              .eq('user_id', entry.userId)
-              .maybeSingle();
-            if (!prof?.tag_granted_at) {
-              await supabase.from('member_profiles').upsert(
-                {
-                  guild_id: entry.guildId,
-                  user_id: entry.userId,
-                  tag_granted_at: new Date().toISOString(),
-                  updated_at: new Date().toISOString(),
-                },
-                { onConflict: 'guild_id,user_id' }
-              );
+          const { data: prof } = await supabase
+            .from('member_profiles')
+            .select('tag_granted_at')
+            .eq('guild_id', entry.guildId)
+            .eq('user_id', entry.userId)
+            .maybeSingle();
+          if (!prof?.tag_granted_at) {
+            const { error: tagErr } = await supabase.from('member_profiles').upsert(
+              {
+                guild_id: entry.guildId,
+                user_id: entry.userId,
+                tag_granted_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+              },
+              { onConflict: 'guild_id,user_id' }
+            );
+            if (tagErr) {
+              console.warn('[earnBuffer] tag upsert skipped', tagErr.message);
             }
-          } catch {
-            /* non-critical */
           }
         }
-
-        flushed += 1;
       } catch (err) {
-        console.error('[earnBuffer] entry flush failed', err.message);
-        const key = entryKey(entry.guildId, entry.userId, entry.source);
-        const existing = buffer.get(key);
-        if (existing) {
-          existing.amount = Number((existing.amount + entry.amount).toFixed(2));
-          existing.messageCount += entry.messageCount;
-          existing.voiceMinutes += entry.voiceMinutes;
-        } else {
-          buffer.set(key, entry);
-        }
+        console.error('[earnBuffer] entry side-effects failed (not requeued)', err.message);
       }
+
+      flushed += 1;
     }
 
     const statDate = new Date().toISOString().slice(0, 10);
     for (const [guildId, count] of serverMsgStats) {
-      await upsertServerDailyStats(guildId, statDate, count, 0).catch(() => null);
+      try {
+        await upsertServerDailyStats(guildId, statDate, count, 0);
+      } catch (err) {
+        console.warn('[earnBuffer] server msg stats skipped', err.message);
+      }
     }
     for (const [guildId, minutes] of serverVoiceStats) {
-      await upsertServerDailyStats(guildId, statDate, 0, minutes).catch(() => null);
+      try {
+        await upsertServerDailyStats(guildId, statDate, 0, minutes);
+      } catch (err) {
+        console.warn('[earnBuffer] server voice stats skipped', err.message);
+      }
     }
 
     if (flushed > 0) {
