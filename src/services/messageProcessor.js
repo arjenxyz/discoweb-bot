@@ -16,7 +16,7 @@ const getServerConfig = async (guildId) => {
     try {
             const { data } = await supabase
                         .from('servers')
-                        .select('verify_role_id,admin_role_id,discord_id,earn_per_message,message_earn_enabled,earn_per_voice_minute,voice_earn_enabled,tag_id,tag_bonus_message,tag_bonus_voice,booster_bonus_message,booster_bonus_voice,earn_channels,spam_message_cooldown_ms,spam_min_message_length,spam_flood_count,spam_flood_window_ms,spam_duplicate_count,daily_message_earn_cap,daily_voice_earn_cap')
+                        .select('verify_role_id,admin_role_id,discord_id,earn_per_message,message_earn_enabled,earn_per_voice_minute,voice_earn_enabled,tag_id,tag_bonus_message,tag_bonus_voice,booster_bonus_message,booster_bonus_voice,earn_channels,spam_message_cooldown_ms,spam_min_message_length,spam_flood_count,spam_flood_window_ms,daily_message_earn_cap,daily_voice_earn_cap')
                 .eq('discord_id', guildId)
                 .maybeSingle();
 

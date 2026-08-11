@@ -1,5 +1,6 @@
 const { supabase } = require('../core/database');
 const { addBalance } = require('./earnings');
+const { isVoiceEligible } = require('./antiSpam');
 
 // Minimum seconds required to count participation
 const MIN_SECONDS = Number(process.env.ACTIVITY_MIN_SECONDS || 60);
@@ -68,25 +69,22 @@ async function handleVoiceStateUpdate(oldState, newState) {
                     try {
                         const { data: server } = await supabase
                             .from('servers')
-                            .select('verify_role_id,voice_earn_enabled,earn_per_voice_minute')
+                            .select('verify_role_id,voice_earn_enabled,earn_per_voice_minute,spam_voice_block_alone,spam_voice_block_mute_deaf')
                             .or(`discord_id.eq.${guildId},id.eq.${guildId}`)
                             .maybeSingle();
 
                         const voiceEnabled = server?.voice_earn_enabled ?? true;
                         const verifyRole = server?.verify_role_id ?? null;
                         if (!voiceEnabled) {
-                            // skip awarding if server disabled voice earnings
                             await supabase.from('activity_participation').update({ awarded: false }).eq('id', participation.id);
                             return;
                         }
 
-                        // If server hasn't set a verify role, do not award anyone
                         if (!verifyRole) {
                             await supabase.from('activity_participation').update({ awarded: false }).eq('id', participation.id);
                             return;
                         }
 
-                        // Verify member has role
                         const member = oldState?.member ?? null;
                         const isApproved = Boolean(member?.roles?.cache?.has(verifyRole));
                         if (!isApproved) {
@@ -94,7 +92,16 @@ async function handleVoiceStateUpdate(oldState, newState) {
                             return;
                         }
 
-                        // Award immediately
+                        // Same voice anti-abuse rules as classic voice earnings
+                        const voiceCheck = isVoiceEligible(oldState, {
+                            spam_voice_block_alone: server?.spam_voice_block_alone,
+                            spam_voice_block_mute_deaf: server?.spam_voice_block_mute_deaf,
+                        });
+                        if (!voiceCheck.allowed) {
+                            await supabase.from('activity_participation').update({ awarded: false }).eq('id', participation.id);
+                            return;
+                        }
+
                         await addBalance(guildId, participation.user_id, amount, 'earn_voice', { session_id: participation.session_id });
                         await supabase.from('activity_participation').update({ awarded: true, award_amount: amount }).eq('id', participation.id);
                     } catch (err) {

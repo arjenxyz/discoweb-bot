@@ -1,14 +1,15 @@
 // modules/antiSpam.js - Anti-spam / anti-abuse koruması (in-memory, DB'ye dokunmaz)
 
-// Per-user tracking: guildId:userId -> { lastEarnTs, recentMessages[], floodCount, floodBlockUntil }
+// Per-user tracking: guildId:userId -> { lastEarnTs, floodTimestamps[], floodBlockUntil }
 const userMap = new Map();
 
 const DEFAULTS = {
     cooldownMs: 5000,
     minLength: 3,
-    duplicateCount: 3,
     floodCount: 5,
     floodWindowMs: 15000,
+    voiceBlockAlone: true,
+    voiceBlockMuteDeaf: true,
 };
 
 // Emoji-only regex: unicode emoji blocks + Discord custom emoji (<:name:id> or <a:name:id>)
@@ -19,8 +20,7 @@ function getEntry(guildId, userId) {
     if (!userMap.has(key)) {
         userMap.set(key, {
             lastEarnTs: 0,
-            recentMessages: [],   // last N message contents
-            floodTimestamps: [],  // timestamps of recent messages
+            floodTimestamps: [],
             floodBlockUntil: 0,
         });
     }
@@ -42,7 +42,6 @@ function shouldEarnMessage(guildId, userId, message, spamCfg = {}) {
 
     const cooldownMs = Number(spamCfg.spam_message_cooldown_ms ?? DEFAULTS.cooldownMs);
     const minLength = Number(spamCfg.spam_min_message_length ?? DEFAULTS.minLength);
-    const dupCount = Number(spamCfg.spam_duplicate_count ?? DEFAULTS.duplicateCount);
     const floodCount = Number(spamCfg.spam_flood_count ?? DEFAULTS.floodCount);
     const floodWindowMs = Number(spamCfg.spam_flood_window_ms ?? DEFAULTS.floodWindowMs);
 
@@ -77,20 +76,10 @@ function shouldEarnMessage(guildId, userId, message, spamCfg = {}) {
         return { allowed: false, reason: 'emoji_only' };
     }
 
-    // 7. Duplicate detection
-    const normalized = content.trim().toLowerCase();
-    if (dupCount > 0 && entry.recentMessages.length >= dupCount) {
-        const lastN = entry.recentMessages.slice(-dupCount);
-        if (lastN.every(m => m === normalized)) {
-            return { allowed: false, reason: 'duplicate' };
-        }
-    }
-
-    // 8. Flood detection: too many messages in window
+    // 7. Flood detection: too many messages in window
     entry.floodTimestamps = entry.floodTimestamps.filter(ts => (now - ts) < floodWindowMs);
     entry.floodTimestamps.push(now);
     if (entry.floodTimestamps.length >= floodCount) {
-        // Block for the flood window duration
         entry.floodBlockUntil = now + floodWindowMs;
         entry.floodTimestamps = [];
         return { allowed: false, reason: 'flood' };
@@ -98,34 +87,35 @@ function shouldEarnMessage(guildId, userId, message, spamCfg = {}) {
 
     // All checks passed - update tracking
     entry.lastEarnTs = now;
-    entry.recentMessages.push(normalized);
-    // Keep only last dupCount+1 messages
-    if (entry.recentMessages.length > (dupCount + 2)) {
-        entry.recentMessages = entry.recentMessages.slice(-(dupCount + 2));
-    }
 
     return { allowed: true, reason: null };
 }
 
 /**
  * Check if a voice state is eligible for earning.
- * @param {VoiceState} voiceState - Discord.js VoiceState
+ * @param {import('discord.js').VoiceState} voiceState
+ * @param {object} spamCfg - server-level voice spam overrides
  * @returns {{ allowed: boolean, reason: string|null }}
  */
-function isVoiceEligible(voiceState) {
+function isVoiceEligible(voiceState, spamCfg = {}) {
     if (!voiceState) return { allowed: false, reason: 'no_state' };
 
+    const blockMuteDeaf = spamCfg.spam_voice_block_mute_deaf ?? DEFAULTS.voiceBlockMuteDeaf;
+    const blockAlone = spamCfg.spam_voice_block_alone ?? DEFAULTS.voiceBlockAlone;
+
     // Self-mute AND self-deaf = AFK behavior
-    if (voiceState.selfMute && voiceState.selfDeaf) {
+    if (blockMuteDeaf && voiceState.selfMute && voiceState.selfDeaf) {
         return { allowed: false, reason: 'self_mute_deaf' };
     }
 
     // Alone in channel (exclude bots)
-    const channel = voiceState.channel;
-    if (channel) {
-        const humanMembers = channel.members.filter(m => !m.user.bot);
-        if (humanMembers.size <= 1) {
-            return { allowed: false, reason: 'alone_in_channel' };
+    if (blockAlone) {
+        const channel = voiceState.channel;
+        if (channel) {
+            const humanMembers = channel.members.filter(m => !m.user.bot);
+            if (humanMembers.size <= 1) {
+                return { allowed: false, reason: 'alone_in_channel' };
+            }
         }
     }
 
@@ -150,4 +140,4 @@ function cleanup() {
     }
 }
 
-module.exports = { shouldEarnMessage, isVoiceEligible, cleanup };
+module.exports = { shouldEarnMessage, isVoiceEligible, cleanup, DEFAULTS };

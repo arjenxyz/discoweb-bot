@@ -14,7 +14,7 @@ if (!config.clientId) {
 
 const { supabase, getGuild, getMaintenanceStatus } = require('./core/database');
 const { processStoreOrders, processPendingOrdersAtMidnight } = require('./services/store');
-const { processVoiceEarnings, addDailyEarning, processDailySettlement } = require('./services/earnings');
+const { processVoiceEarnings, processDailySettlement } = require('./services/earnings');
 const { handleMessage } = require('./services/messageProcessor');
 const { logSystemError } = require('./core/errorHandler');
 const permissionCache = require('./services/permissionCache');
@@ -653,7 +653,7 @@ client.once('ready', async () => {
         });
     }, 60000);
 
-    // Voice earnings are now awarded on disconnect; listen to voiceStateUpdate
+    // Discord Activity session join/leave rewards
     client.on('voiceStateUpdate', async (oldState, newState) => {
         try {
             await activity.handleVoiceStateUpdate(oldState, newState);
@@ -661,6 +661,13 @@ client.once('ready', async () => {
             console.error('voiceStateUpdate handler error:', err);
         }
     });
+
+    // Klasik ses kazancı: her dakika seste olan uygun üyelere daily_earnings yaz
+    setInterval(() => {
+        client.guilds.cache.forEach((guild) => {
+            void processVoiceEarnings(client, guild.id, config.requiredRoleId, config.earnPerVoiceMinute);
+        });
+    }, 60 * 1000);
 
     // Auto-settlement at 00:00 TR (21:00 UTC) — check every minute
     setInterval(() => {

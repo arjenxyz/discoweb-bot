@@ -105,11 +105,20 @@ const processVoiceEarnings = async (client, guildId, requiredRoleId, earnPerVoic
         // Fetch per-server settings to enforce verify role and voice earning toggle
         let serverCfg = null;
         try {
-            const { data } = await supabase
+            const selectCols = 'verify_role_id,voice_earn_enabled,earn_per_voice_minute,discord_id,id,tag_id,tag_bonus_voice,booster_bonus_voice,earn_channels,spam_voice_block_alone,spam_voice_block_mute_deaf';
+            let { data, error } = await supabase
                 .from('servers')
-                .select('verify_role_id,voice_earn_enabled,earn_per_voice_minute,discord_id,id,tag_id,tag_bonus_voice,booster_bonus_voice,earn_channels')
+                .select(selectCols)
                 .or(`discord_id.eq.${guildId},id.eq.${guildId}`)
                 .maybeSingle();
+            if (error) {
+                const fallback = await supabase
+                    .from('servers')
+                    .select('verify_role_id,voice_earn_enabled,earn_per_voice_minute,discord_id,id,tag_id,tag_bonus_voice,booster_bonus_voice,earn_channels')
+                    .or(`discord_id.eq.${guildId},id.eq.${guildId}`)
+                    .maybeSingle();
+                data = fallback.data;
+            }
             serverCfg = data || null;
         } catch (e) {
             serverCfg = null;
@@ -145,8 +154,11 @@ const processVoiceEarnings = async (client, guildId, requiredRoleId, earnPerVoic
         const isApproved = Boolean(member.roles.cache.has(cfgVerifyRole));
         if (!isApproved) continue;
 
-        // Anti-spam: check voice eligibility
-        const voiceCheck = isVoiceEligible(voiceState);
+        // Anti-spam: check voice eligibility (admin-configurable)
+        const voiceCheck = isVoiceEligible(voiceState, {
+            spam_voice_block_alone: serverCfg?.spam_voice_block_alone,
+            spam_voice_block_mute_deaf: serverCfg?.spam_voice_block_mute_deaf,
+        });
         if (!voiceCheck.allowed) {
             console.log(`[antiSpam] voice skip guild:${guildId} user:${member.id} reason:${voiceCheck.reason}`);
             continue;
