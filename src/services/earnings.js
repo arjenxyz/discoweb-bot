@@ -105,7 +105,7 @@ const processVoiceEarnings = async (client, guildId, requiredRoleId, earnPerVoic
         // Fetch per-server settings to enforce verify role and voice earning toggle
         let serverCfg = null;
         try {
-            const selectCols = 'verify_role_id,voice_earn_enabled,earn_per_voice_minute,discord_id,id,tag_id,tag_bonus_voice,booster_bonus_voice,earn_channels,spam_voice_block_alone,spam_voice_block_mute_deaf';
+            const selectCols = 'verify_role_id,voice_earn_enabled,earn_per_voice_minute,discord_id,id,tag_id,tag_bonus_voice,booster_bonus_voice,earn_channels,spam_voice_block_alone,spam_voice_block_mute_deaf,daily_voice_earn_cap';
             let { data, error } = await supabase
                 .from('servers')
                 .select(selectCols)
@@ -114,7 +114,7 @@ const processVoiceEarnings = async (client, guildId, requiredRoleId, earnPerVoic
             if (error) {
                 const fallback = await supabase
                     .from('servers')
-                    .select('verify_role_id,voice_earn_enabled,earn_per_voice_minute,discord_id,id,tag_id,tag_bonus_voice,booster_bonus_voice,earn_channels')
+                    .select('verify_role_id,voice_earn_enabled,earn_per_voice_minute,discord_id,id,tag_id,tag_bonus_voice,booster_bonus_voice,earn_channels,daily_voice_earn_cap')
                     .or(`discord_id.eq.${guildId},id.eq.${guildId}`)
                     .maybeSingle();
                 data = fallback.data;
@@ -201,7 +201,18 @@ const processVoiceEarnings = async (client, guildId, requiredRoleId, earnPerVoic
                 let bonus = 0;
                 if (hasTag) bonus += tagBonusVoice;
                 if (isBooster) bonus += boosterBonusVoice;
-        const total = Number((perMinute + bonus).toFixed(2));
+        const totalRaw = Number((perMinute + bonus).toFixed(2));
+        const total = await clampToDailyCap(
+            guildId,
+            member.id,
+            'voice',
+            totalRaw,
+            serverCfg?.daily_voice_earn_cap
+        );
+        if (!total || total <= 0) {
+            console.log(`[antiSpam] voice daily cap reached guild:${guildId} user:${member.id}`);
+            continue;
+        }
 
         console.log(`[earnings] processVoiceEarnings - guild:${guildId} member:${member.id} channel:${voiceState.channelId} base:${perMinute} bonus:${bonus} total:${total} (awarding immediately)`);
 
@@ -293,6 +304,32 @@ const addDailyEarning = async (guildId, userId, source, amount, metadata = {}) =
             console.log(`[earnings] addDailyEarning inserted - guild:${guildId} user:${userId} source:${source} amount:${amount} date:${dateIso}`);
         }
     }
+};
+
+/**
+ * Returns how much of `amount` can still be awarded today under an optional daily cap.
+ * Cap 0 / null / undefined = unlimited. Settled rows still count toward the day total.
+ */
+const clampToDailyCap = async (guildId, userId, source, amount, dailyCap) => {
+    const cap = Number(dailyCap ?? 0);
+    if (!cap || cap <= 0 || !amount || amount <= 0) return amount;
+
+    const earningDate = getLocalDate(180);
+    const dateIso = earningDate.toISOString().slice(0, 10);
+
+    const { data: row } = await supabase
+        .from('daily_earnings')
+        .select('amount')
+        .eq('guild_id', guildId)
+        .eq('user_id', userId)
+        .eq('source', source)
+        .eq('earning_date', dateIso)
+        .maybeSingle();
+
+    const current = Number(row?.amount || 0);
+    const remaining = Number((cap - current).toFixed(2));
+    if (remaining <= 0) return 0;
+    return Math.min(amount, remaining);
 };
 
 const upsertMemberDailyStats = async (guildId, userId, statDate, messageCount, voiceMinutes) => {
@@ -478,6 +515,7 @@ module.exports = {
     addBalance,
     processVoiceEarnings,
     addDailyEarning,
+    clampToDailyCap,
     processDailySettlement,
     upsertMemberDailyStats,
     upsertServerDailyStats

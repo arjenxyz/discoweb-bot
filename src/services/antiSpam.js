@@ -8,8 +8,16 @@ const DEFAULTS = {
     minLength: 3,
     floodCount: 5,
     floodWindowMs: 15000,
+    blockStickerOnly: true,
+    blockAttachmentOnly: true,
+    blockEmojiOnly: true,
     voiceBlockAlone: true,
     voiceBlockMuteDeaf: true,
+};
+
+const bool = (value, fallback) => {
+    if (value === undefined || value === null) return fallback;
+    return !(value === false || value === 0 || value === 'false' || value === '0');
 };
 
 // Emoji-only regex: unicode emoji blocks + Discord custom emoji (<:name:id> or <a:name:id>)
@@ -44,6 +52,9 @@ function shouldEarnMessage(guildId, userId, message, spamCfg = {}) {
     const minLength = Number(spamCfg.spam_min_message_length ?? DEFAULTS.minLength);
     const floodCount = Number(spamCfg.spam_flood_count ?? DEFAULTS.floodCount);
     const floodWindowMs = Number(spamCfg.spam_flood_window_ms ?? DEFAULTS.floodWindowMs);
+    const blockStickerOnly = bool(spamCfg.spam_block_sticker_only, DEFAULTS.blockStickerOnly);
+    const blockAttachmentOnly = bool(spamCfg.spam_block_attachment_only, DEFAULTS.blockAttachmentOnly);
+    const blockEmojiOnly = bool(spamCfg.spam_block_emoji_only, DEFAULTS.blockEmojiOnly);
 
     // 1. Flood block active?
     if (entry.floodBlockUntil > now) {
@@ -56,12 +67,12 @@ function shouldEarnMessage(guildId, userId, message, spamCfg = {}) {
     }
 
     // 3. Sticker-only messages
-    if (message.stickers && message.stickers.size > 0 && content.trim().length === 0) {
+    if (blockStickerOnly && message.stickers && message.stickers.size > 0 && content.trim().length === 0) {
         return { allowed: false, reason: 'sticker_only' };
     }
 
     // 4. Attachment/GIF-only (no text)
-    if (message.attachments && message.attachments.size > 0 && content.trim().length === 0) {
+    if (blockAttachmentOnly && message.attachments && message.attachments.size > 0 && content.trim().length === 0) {
         return { allowed: false, reason: 'attachment_only' };
     }
 
@@ -72,7 +83,7 @@ function shouldEarnMessage(guildId, userId, message, spamCfg = {}) {
     }
 
     // 6. Emoji-only
-    if (EMOJI_ONLY_RE.test(stripped)) {
+    if (blockEmojiOnly && EMOJI_ONLY_RE.test(stripped)) {
         return { allowed: false, reason: 'emoji_only' };
     }
 
@@ -100,8 +111,8 @@ function shouldEarnMessage(guildId, userId, message, spamCfg = {}) {
 function isVoiceEligible(voiceState, spamCfg = {}) {
     if (!voiceState) return { allowed: false, reason: 'no_state' };
 
-    const blockMuteDeaf = spamCfg.spam_voice_block_mute_deaf ?? DEFAULTS.voiceBlockMuteDeaf;
-    const blockAlone = spamCfg.spam_voice_block_alone ?? DEFAULTS.voiceBlockAlone;
+    const blockMuteDeaf = bool(spamCfg.spam_voice_block_mute_deaf, DEFAULTS.voiceBlockMuteDeaf);
+    const blockAlone = bool(spamCfg.spam_voice_block_alone, DEFAULTS.voiceBlockAlone);
 
     // Self-mute AND self-deaf = AFK behavior
     if (blockMuteDeaf && voiceState.selfMute && voiceState.selfDeaf) {

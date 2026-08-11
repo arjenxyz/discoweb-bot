@@ -1,7 +1,7 @@
 // modules/commands/index.js - Ana komut yönlendirici
 // imports removed
 const { supabase } = require('../core/database');
-const { addDailyEarning, upsertMemberDailyStats, upsertServerDailyStats } = require('./earnings');
+const { addDailyEarning, clampToDailyCap, upsertMemberDailyStats, upsertServerDailyStats } = require('./earnings');
 const { shouldEarnMessage } = require('./antiSpam');
 
 // Simple in-memory cache for server settings to avoid DB hit on every message
@@ -16,7 +16,7 @@ const getServerConfig = async (guildId) => {
     try {
             const { data } = await supabase
                         .from('servers')
-                        .select('verify_role_id,admin_role_id,discord_id,earn_per_message,message_earn_enabled,earn_per_voice_minute,voice_earn_enabled,tag_id,tag_bonus_message,tag_bonus_voice,booster_bonus_message,booster_bonus_voice,earn_channels,spam_message_cooldown_ms,spam_min_message_length,spam_flood_count,spam_flood_window_ms,daily_message_earn_cap,daily_voice_earn_cap')
+                        .select('verify_role_id,admin_role_id,discord_id,earn_per_message,message_earn_enabled,earn_per_voice_minute,voice_earn_enabled,tag_id,tag_bonus_message,tag_bonus_voice,booster_bonus_message,booster_bonus_voice,earn_channels,spam_message_cooldown_ms,spam_min_message_length,spam_flood_count,spam_flood_window_ms,spam_block_sticker_only,spam_block_attachment_only,spam_block_emoji_only,daily_message_earn_cap,daily_voice_earn_cap')
                 .eq('discord_id', guildId)
                 .maybeSingle();
 
@@ -136,7 +136,18 @@ const handleMessage = async (message, config) => {
             if (hasTag) bonus += tagBonusMessage;
             if (isBooster) bonus += boosterBonusMessage;
 
-            const total = Number((earnPerMessage + bonus).toFixed(2));
+            const totalRaw = Number((earnPerMessage + bonus).toFixed(2));
+            const total = await clampToDailyCap(
+                message.guild.id,
+                message.author.id,
+                'message',
+                totalRaw,
+                serverCfg?.daily_message_earn_cap
+            );
+            if (!total || total <= 0) {
+                console.log(`[antiSpam] message daily cap reached guild:${message.guild.id} user:${message.author.id}`);
+                return;
+            }
 
             // If user has the tag, record tag_granted_at in member_profiles if not already set
             // Use Discord guild ID (not internal server UUID) to match permissionCache and web API
