@@ -1,0 +1,39 @@
+# Render Blueprint — https://dashboard.render.com → New → Blueprint
+# Repo: arjenxyz/discoweb-bot
+#
+# Web Service seçildi: Discord Gateway + Express BOT API aynı process'te.
+
+services:
+  - type: web
+    name: discoweb-bot
+    runtime: node
+    plan: starter
+    region: frankfurt
+    branch: main
+    autoDeployTrigger: commit
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /api/test
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: DISCORD_CLIENT_ID
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: BOT_API_KEY
+        sync: false
+      - key: WEB_URL
+        sync: false
+      - key: QUIZ_CRON_SECRET
+        sync: false
+      - key: PAPEL_PER_MESSAGE
+        value: "0.2"
+      - key: PAPEL_PER_VOICE_MINUTE
+        value: "0.2"
+      - key: PAPEL_TIMEZONE_OFFSET
+        value: "180"
