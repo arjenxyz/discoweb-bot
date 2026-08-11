@@ -49,6 +49,13 @@ async function queueMessageEarn({
 }) {
   if (!guildId || !userId || !(amount > 0)) return { queued: 0 };
 
+  try {
+    const { isIncidentActive } = require('./incidentGate');
+    if (await isIncidentActive()) return { queued: 0, reason: 'incident' };
+  } catch {
+    /* non-fatal */
+  }
+
   const pending = getPendingAmount(guildId, userId, 'message');
   const allowedTotal = await clampToDailyCap(guildId, userId, 'message', pending + amount, dailyCap);
   const add = Number((allowedTotal - pending).toFixed(2));
@@ -98,6 +105,13 @@ async function queueVoiceEarn({
 }) {
   if (!guildId || !userId || !(amount > 0)) return { queued: 0 };
 
+  try {
+    const { isIncidentActive } = require('./incidentGate');
+    if (await isIncidentActive()) return { queued: 0, reason: 'incident' };
+  } catch {
+    /* non-fatal */
+  }
+
   const pending = getPendingAmount(guildId, userId, 'voice');
   const allowedTotal = await clampToDailyCap(guildId, userId, 'voice', pending + amount, dailyCap);
   const add = Number((allowedTotal - pending).toFixed(2));
@@ -133,6 +147,18 @@ async function queueVoiceEarn({
 async function flushEarnBuffer(reason = 'manual') {
   if (flushing) return { flushed: 0, reason: 'busy' };
   if (buffer.size === 0) return { flushed: 0 };
+
+  try {
+    const { isIncidentActive } = require('./incidentGate');
+    if (await isIncidentActive()) {
+      // Drop pending awards during global incident — do not write to DB.
+      buffer.clear();
+      console.warn('[earnBuffer] flush aborted — incident active, buffer cleared');
+      return { flushed: 0, reason: 'incident' };
+    }
+  } catch {
+    /* non-fatal */
+  }
 
   flushing = true;
   const entries = [...buffer.values()];

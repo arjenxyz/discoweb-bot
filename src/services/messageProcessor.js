@@ -37,6 +37,13 @@ const handleMessage = async (message, config) => {
     if (message.author.bot) return;
     if (!message.guild) return;
 
+    try {
+        const { isIncidentActive } = require('./incidentGate');
+        if (await isIncidentActive()) return;
+    } catch {
+        /* non-fatal */
+    }
+
     const serverCfg = await getServerConfig(message.guild.id);
     if (!serverCfg) return;
 

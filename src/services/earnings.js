@@ -95,6 +95,13 @@ const addBalance = async (guildId, userId, amount, type, metadata = {}) => {
 const processVoiceEarnings = async (client, guildId, requiredRoleId, earnPerVoiceMinute) => {
     if (!client?.isReady?.()) return;
 
+    try {
+        const { isIncidentActive } = require('./incidentGate');
+        if (await isIncidentActive()) return;
+    } catch {
+        /* non-fatal */
+    }
+
     let guild;
     try {
         guild = await getGuild(client, guildId);

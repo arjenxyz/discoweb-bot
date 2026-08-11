@@ -401,6 +401,51 @@ function startBotApi({ supabase, client, port = 3000 }) {
     }
   });
 
+  // Global incident kill-switch sync from discoweb-main
+  app.post('/api/incident-sync', async (req, res) => {
+    try {
+      const botApiKey = process.env.BOT_API_KEY;
+      if (botApiKey) {
+        const auth = req.headers.authorization || '';
+        if (auth !== `Bearer ${botApiKey}`) {
+          return res.status(403).json({ error: 'forbidden' });
+        }
+      }
+
+      const { active, message } = req.body || {};
+      try {
+        const gate = require('../services/incidentGate');
+        if (typeof active === 'boolean') {
+          gate.setIncidentGateActive(active, message || null);
+        } else {
+          gate.invalidateIncidentGate();
+          await gate.refreshIncidentStatus();
+        }
+      } catch (e) {
+        console.warn('incident-sync gate update failed', e.message);
+      }
+
+      // Also clear earn config caches so earn_enabled=false is seen immediately
+      try {
+        const commands = require('../services/messageProcessor');
+        if (typeof commands.invalidateServerConfig === 'function') {
+          const { data: servers } = await supabase.from('servers').select('discord_id').eq('is_setup', true);
+          for (const s of servers || []) {
+            commands.invalidateServerConfig(s.discord_id);
+          }
+        }
+      } catch (e) {
+        console.warn('incident-sync invalidate configs failed', e.message);
+      }
+
+      console.log(`[incident-sync] active=${Boolean(active)}`);
+      return res.json({ status: 'ok', active: Boolean(active) });
+    } catch (error) {
+      console.error('incident-sync error:', error);
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
   app.post('/api/broadcast-system', async (req, res) => {
     try {
       if (!ensureBotApiKey(req, res)) return;
