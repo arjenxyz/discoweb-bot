@@ -14,7 +14,7 @@ if (!config.clientId) {
 
 const { supabase, getGuild, getMaintenanceStatus } = require('./core/database');
 const { processStoreOrders, processPendingOrdersAtMidnight } = require('./services/store');
-const { processVoiceEarnings, processDailySettlement } = require('./services/earnings');
+const { processVoiceEarnings, handleVoiceStateForEarnings, processDailySettlement } = require('./services/earnings');
 const { handleMessage } = require('./services/messageProcessor');
 const { logSystemError } = require('./core/errorHandler');
 const permissionCache = require('./services/permissionCache');
@@ -653,21 +653,28 @@ client.once('ready', async () => {
         });
     }, 60000);
 
-    // Discord Activity session join/leave rewards
+    // Discord Activity session + klasik ses join/leave tracking
     client.on('voiceStateUpdate', async (oldState, newState) => {
         try {
             await activity.handleVoiceStateUpdate(oldState, newState);
         } catch (err) {
-            console.error('voiceStateUpdate handler error:', err);
+            console.error('voiceStateUpdate activity handler error:', err);
+        }
+        try {
+            await handleVoiceStateForEarnings(oldState, newState);
+        } catch (err) {
+            console.error('voiceStateUpdate earnings handler error:', err);
         }
     });
 
-    // Klasik ses kazancı: her dakika seste olan uygun üyelere daily_earnings yaz
-    setInterval(() => {
+    // Klasik ses kazancı yedek tick: her dakika aktif oturumlara tam dakika yaz
+    const runVoiceTicks = () => {
         client.guilds.cache.forEach((guild) => {
             void processVoiceEarnings(client, guild.id, config.requiredRoleId, config.earnPerVoiceMinute);
         });
-    }, 60 * 1000);
+    };
+    runVoiceTicks(); // bot açılınca bir kez
+    setInterval(runVoiceTicks, 60 * 1000);
 
     // Auto-settlement at 00:00 TR (21:00 UTC) — check every minute
     setInterval(() => {

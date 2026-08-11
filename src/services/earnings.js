@@ -93,153 +93,402 @@ const addBalance = async (guildId, userId, amount, type, metadata = {}) => {
 };
 
 const processVoiceEarnings = async (client, guildId, requiredRoleId, earnPerVoiceMinute) => {
-    if (!client.isReady()) return;
-    const guild = await getGuild(client, guildId);
+    if (!client?.isReady?.()) return;
 
-    const voiceStates = guild.voiceStates.cache;
-    for (const [, voiceState] of voiceStates) {
-        const member = voiceState.member;
-        if (!member || member.user.bot) continue;
-        if (!voiceState.channelId) continue;
+    let guild;
+    try {
+        guild = await getGuild(client, guildId);
+    } catch (e) {
+        console.error(`[earnings] processVoiceEarnings getGuild failed guild:${guildId}`, e.message);
+        return;
+    }
+    if (!guild) return;
 
-        // Fetch per-server settings to enforce verify role and voice earning toggle
-        let serverCfg = null;
+    const serverCfg = await getVoiceServerConfig(guildId);
+    if (!serverCfg) {
+        console.warn(`[earnings] voice skip guild:${guildId} — servers kaydı yok / config okunamadı`);
+        return;
+    }
+
+    const cfgVerifyRole = serverCfg.verify_role_id ?? null;
+    const voiceEnabled = serverCfg.voice_earn_enabled ?? true;
+    if (!cfgVerifyRole) {
+        console.warn(`[earnings] voice skip guild:${guildId} — verify_role_id yok`);
+        return;
+    }
+    if (!voiceEnabled) {
+        console.warn(`[earnings] voice skip guild:${guildId} — voice_earn_enabled=false`);
+        return;
+    }
+
+    const perMinute = Number(
+        serverCfg.earn_per_voice_minute ?? earnPerVoiceMinute ?? process.env.PAPEL_PER_VOICE_MINUTE ?? 0.2
+    );
+    if (!(perMinute > 0)) return;
+
+    const now = Date.now();
+    let awardedUsers = 0;
+    let skipped = 0;
+
+    // Ensure sessions exist for everyone currently in voice, then award elapsed full minutes
+    for (const [, voiceState] of guild.voiceStates.cache) {
         try {
-            const selectCols = 'verify_role_id,voice_earn_enabled,earn_per_voice_minute,discord_id,id,tag_id,tag_bonus_voice,booster_bonus_voice,earn_channels,spam_voice_block_alone,spam_voice_block_mute_deaf,daily_voice_earn_cap';
-            let { data, error } = await supabase
-                .from('servers')
-                .select(selectCols)
-                .or(`discord_id.eq.${guildId},id.eq.${guildId}`)
-                .maybeSingle();
-            if (error) {
-                const fallback = await supabase
-                    .from('servers')
-                    .select('verify_role_id,voice_earn_enabled,earn_per_voice_minute,discord_id,id,tag_id,tag_bonus_voice,booster_bonus_voice,earn_channels,daily_voice_earn_cap')
-                    .or(`discord_id.eq.${guildId},id.eq.${guildId}`)
-                    .maybeSingle();
-                data = fallback.data;
-            }
-            serverCfg = data || null;
-        } catch (e) {
-            serverCfg = null;
-        }
-
-        const cfgVerifyRole = serverCfg?.verify_role_id ?? null;
-        const voiceEnabled = serverCfg?.voice_earn_enabled ?? true;
-        const perMinute = Number(serverCfg?.earn_per_voice_minute ?? earnPerVoiceMinute ?? process.env.PAPEL_PER_VOICE_MINUTE ?? 0.2);
-        const tagId = serverCfg?.tag_id ?? null;
-        const tagBonusVoice = Number(serverCfg?.tag_bonus_voice ?? 0) || 0;
-        const boosterBonusVoice = Number(serverCfg?.booster_bonus_voice ?? 0) || 0;
-
-        // If server has not configured a verify role, do not award anyone — they haven't accepted terms.
-        if (!cfgVerifyRole) continue;
-        if (!voiceEnabled) continue;
-
-        // Channel-based earning filter for voice channels
-        const earnChannels = serverCfg?.earn_channels ?? null;
-        if (earnChannels && typeof earnChannels === 'object') {
-            const mode = earnChannels.mode; // 'whitelist' or 'blacklist'
-            const voiceChList = earnChannels.voice_channels || [];
-            const voiceCatList = earnChannels.voice_categories || [];
-            const channelId = voiceState.channelId;
-            const channel = voiceState.channel;
-            const categoryId = channel?.parentId || channel?.parent_id || null;
-
-            const isInList = voiceChList.includes(channelId) || (categoryId && voiceCatList.includes(categoryId));
-
-            if (mode === 'whitelist' && !isInList) continue;
-            if (mode === 'blacklist' && isInList) continue;
-        }
-
-        const isApproved = Boolean(member.roles.cache.has(cfgVerifyRole));
-        if (!isApproved) continue;
-
-        // Anti-spam: check voice eligibility (admin-configurable)
-        const voiceCheck = isVoiceEligible(voiceState, {
-            spam_voice_block_alone: serverCfg?.spam_voice_block_alone,
-            spam_voice_block_mute_deaf: serverCfg?.spam_voice_block_mute_deaf,
-        });
-        if (!voiceCheck.allowed) {
-            console.log(`[antiSpam] voice skip guild:${guildId} user:${member.id} reason:${voiceCheck.reason}`);
-            continue;
-        }
-
-                // compute tag/booster bonuses using permission cache when available
-                const permissionCache = require('./permissionCache');
-                let hasTag = false;
-                let isBooster = false;
-                // ensure these are declared in outer scope so they exist regardless of branch
-                let memberTagId = null;
-                let memberPrimaryGuildId = null;
-                try {
-                    const entry = await permissionCache.get(client, guildId, member.id);
-                    if (entry) {
-                        hasTag = Boolean(entry.hasTag);
-                        isBooster = Boolean(entry.isBooster);
-                        // try to surface legacy ids if present on entry
-                        if (entry.memberTagId) memberTagId = entry.memberTagId;
-                        if (entry.primaryGuildId) memberPrimaryGuildId = entry.primaryGuildId;
-                    } else {
-                        // fallback to legacy detection and seed cache
-                        const { getMemberServerTagId, getMemberPrimaryGuildId } = require('../utils/memberTag');
-                        memberTagId = getMemberServerTagId(member);
-                        memberPrimaryGuildId = getMemberPrimaryGuildId(member);
-                        hasTag = Boolean(tagId && (String(memberPrimaryGuildId) === String(tagId) || String(memberTagId) === String(tagId)));
-                        isBooster = Boolean(member.premiumSinceTimestamp || member.premiumSince);
-                        // attempt to update the cache asynchronously
-                        permissionCache.updateForMember(client, guildId, member).catch(() => null);
-                    }
-                } catch (e) {
-                    console.warn('permissionCache lookup failed, falling back', e);
-                    const { getMemberServerTagId, getMemberPrimaryGuildId } = require('../utils/memberTag');
-                    memberTagId = getMemberServerTagId(member);
-                    memberPrimaryGuildId = getMemberPrimaryGuildId(member);
-                    hasTag = Boolean(tagId && (String(memberPrimaryGuildId) === String(tagId) || String(memberTagId) === String(tagId)));
-                    isBooster = Boolean(member.premiumSinceTimestamp || member.premiumSince);
+            if (!voiceState?.channelId) continue;
+            let member = voiceState.member;
+            if (!member || member.user?.bot) {
+                if (voiceState.id) {
+                    member = await guild.members.fetch(voiceState.id).catch(() => null);
                 }
-
-                let bonus = 0;
-                if (hasTag) bonus += tagBonusVoice;
-                if (isBooster) bonus += boosterBonusVoice;
-        const totalRaw = Number((perMinute + bonus).toFixed(2));
-        const total = await clampToDailyCap(
-            guildId,
-            member.id,
-            'voice',
-            totalRaw,
-            serverCfg?.daily_voice_earn_cap
-        );
-        if (!total || total <= 0) {
-            console.log(`[antiSpam] voice daily cap reached guild:${guildId} user:${member.id}`);
-            continue;
-        }
-
-        console.log(`[earnings] processVoiceEarnings - guild:${guildId} member:${member.id} channel:${voiceState.channelId} base:${perMinute} bonus:${bonus} total:${total} (awarding immediately)`);
-
-        // If user has the tag, record tag_granted_at in member_profiles if not already set
-        // Use Discord guild ID (not internal server UUID) to match permissionCache and web API
-        if (hasTag) {
-            try {
-                const { data: prof } = await supabase.from('member_profiles').select('tag_granted_at').eq('guild_id', guildId).eq('user_id', member.id).maybeSingle();
-                if (!prof || !prof.tag_granted_at) {
-                    await supabase.from('member_profiles').upsert({ guild_id: guildId, user_id: member.id, tag_granted_at: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: 'guild_id,user_id' });
-                }
-            } catch (e) {
-                console.warn('Failed to upsert tag_granted_at', e);
             }
-        }
+            if (!member || member.user?.bot) continue;
 
-        // Accumulate in daily_earnings (settled via claim or auto-settlement at 00:00 TR)
-            await addDailyEarning(guildId, member.id, 'voice', total, {
-            channelId: voiceState.channelId,
-            base: perMinute,
-            bonus,
-            hasTag,
-            isBooster,
-                memberTagId: memberTagId ?? null,
-        });
+            const key = voiceKey(guildId, member.id);
+            if (!voiceSessions.has(key)) {
+                voiceSessions.set(key, {
+                    joinedAt: now,
+                    lastAwardAt: now,
+                    channelId: voiceState.channelId,
+                });
+                // İlk dakikayı bekle — hemen ödül verme
+                continue;
+            }
+
+            const session = voiceSessions.get(key);
+            if (session.channelId !== voiceState.channelId) {
+                session.channelId = voiceState.channelId;
+            }
+
+            const elapsedMs = now - session.lastAwardAt;
+            const minutes = Math.floor(elapsedMs / 60_000);
+            if (minutes <= 0) continue;
+
+            const result = await awardVoiceMinutes({
+                client,
+                guild,
+                guildId,
+                member,
+                voiceState,
+                serverCfg,
+                minutes,
+                perMinute,
+                channelId: voiceState.channelId,
+            });
+
+            if (result.awarded) {
+                session.lastAwardAt += minutes * 60_000;
+                awardedUsers += 1;
+            } else {
+                // Uygun değilse süreyi sıfırlama — eligible olunca geçmiş dakikalar birikir
+                // Ama alone/mute gibi geçici durumlarda şişmesin diye lastAwardAt'i şimdiye çek
+                if (result.reason === 'alone_in_channel' || result.reason === 'self_mute_deaf') {
+                    session.lastAwardAt = now;
+                }
+                skipped += 1;
+            }
+        } catch (err) {
+            console.error(`[earnings] voice tick user error guild:${guildId}`, err.message);
+        }
+    }
+
+    // Ayrılmış ama map'te kalan oturumları temizle
+    for (const [key, session] of voiceSessions) {
+        if (!key.startsWith(`${guildId}:`)) continue;
+        const userId = key.slice(guildId.length + 1);
+        const vs = guild.voiceStates.cache.get(userId);
+        if (!vs?.channelId) {
+            voiceSessions.delete(key);
+        }
+    }
+
+    if (awardedUsers > 0 || skipped > 0) {
+        console.log(`[earnings] voice tick guild:${guildId} awarded:${awardedUsers} skipped:${skipped} sessions:${[...voiceSessions.keys()].filter(k => k.startsWith(`${guildId}:`)).length}`);
     }
 };
+
+/**
+ * Track join/leave so short sessions and channel switches are accounted for.
+ */
+const handleVoiceStateForEarnings = async (oldState, newState) => {
+    try {
+        const member = newState.member ?? oldState.member;
+        if (!member || member.user?.bot) return;
+
+        const guild = newState.guild ?? oldState.guild;
+        if (!guild) return;
+
+        const guildId = guild.id;
+        const userId = member.id;
+        const key = voiceKey(guildId, userId);
+        const oldChannel = oldState?.channelId || null;
+        const newChannel = newState?.channelId || null;
+        const now = Date.now();
+
+        // Join
+        if (!oldChannel && newChannel) {
+            voiceSessions.set(key, {
+                joinedAt: now,
+                lastAwardAt: now,
+                channelId: newChannel,
+            });
+            console.log(`[earnings] voice join guild:${guildId} user:${userId} channel:${newChannel}`);
+            return;
+        }
+
+        // Leave
+        if (oldChannel && !newChannel) {
+            const session = voiceSessions.get(key);
+            voiceSessions.delete(key);
+            if (!session) return;
+
+            const minutes = Math.floor((now - session.lastAwardAt) / 60_000);
+            console.log(`[earnings] voice leave guild:${guildId} user:${userId} minutesPending:${minutes}`);
+            if (minutes <= 0) return;
+
+            const serverCfg = await getVoiceServerConfig(guildId);
+            if (!serverCfg) return;
+            const perMinute = Number(
+                serverCfg.earn_per_voice_minute ?? process.env.PAPEL_PER_VOICE_MINUTE ?? 0.2
+            );
+            if (!(perMinute > 0)) return;
+
+            // Use oldState for eligibility (channel membership at leave)
+            await awardVoiceMinutes({
+                client: guild.client,
+                guild,
+                guildId,
+                member,
+                voiceState: oldState,
+                serverCfg,
+                minutes,
+                perMinute,
+                channelId: oldChannel,
+            });
+            return;
+        }
+
+        // Channel switch
+        if (oldChannel && newChannel && oldChannel !== newChannel) {
+            const session = voiceSessions.get(key);
+            if (session) {
+                const minutes = Math.floor((now - session.lastAwardAt) / 60_000);
+                if (minutes > 0) {
+                    const serverCfg = await getVoiceServerConfig(guildId);
+                    if (serverCfg) {
+                        const perMinute = Number(
+                            serverCfg.earn_per_voice_minute ?? process.env.PAPEL_PER_VOICE_MINUTE ?? 0.2
+                        );
+                        if (perMinute > 0) {
+                            await awardVoiceMinutes({
+                                client: guild.client,
+                                guild,
+                                guildId,
+                                member,
+                                voiceState: oldState,
+                                serverCfg,
+                                minutes,
+                                perMinute,
+                                channelId: oldChannel,
+                            });
+                        }
+                    }
+                }
+            }
+            voiceSessions.set(key, {
+                joinedAt: now,
+                lastAwardAt: now,
+                channelId: newChannel,
+            });
+            console.log(`[earnings] voice switch guild:${guildId} user:${userId} ${oldChannel} -> ${newChannel}`);
+        }
+    } catch (err) {
+        console.error('[earnings] handleVoiceStateForEarnings error:', err);
+    }
+};
+
+const voiceConfigCache = new Map(); // guildId -> { ts, data }
+const VOICE_CONFIG_TTL = 60_000;
+const voiceSessions = new Map(); // guildId:userId -> { joinedAt, lastAwardAt, channelId }
+
+function voiceKey(guildId, userId) {
+    return `${guildId}:${userId}`;
+}
+
+async function getVoiceServerConfig(guildId) {
+    const cached = voiceConfigCache.get(guildId);
+    const now = Date.now();
+    if (cached && now - cached.ts < VOICE_CONFIG_TTL) return cached.data;
+
+    try {
+        // select('*') — eksik kolon yüzünden tüm sorgunun düşmesini engeller
+        const { data, error } = await supabase
+            .from('servers')
+            .select('*')
+            .eq('discord_id', guildId)
+            .maybeSingle();
+
+        if (error) {
+            console.error(`[earnings] getVoiceServerConfig error guild:${guildId}`, error.message);
+            voiceConfigCache.set(guildId, { ts: now, data: null });
+            return null;
+        }
+
+        voiceConfigCache.set(guildId, { ts: now, data: data || null });
+        return data || null;
+    } catch (e) {
+        console.error(`[earnings] getVoiceServerConfig unexpected guild:${guildId}`, e.message);
+        return null;
+    }
+}
+
+function passesVoiceChannelFilter(serverCfg, channelId, categoryId) {
+    const earnChannels = serverCfg?.earn_channels ?? null;
+    if (!earnChannels || typeof earnChannels !== 'object') return true;
+
+    const mode = earnChannels.mode;
+    if (!mode || mode === 'all') return true;
+
+    const voiceChList = earnChannels.voice_channels || [];
+    const voiceCatList = earnChannels.voice_categories || [];
+    const isInList = voiceChList.includes(channelId) || (categoryId && voiceCatList.includes(categoryId));
+
+    if (mode === 'whitelist') return isInList;
+    if (mode === 'blacklist') return !isInList;
+    return true;
+}
+
+async function awardVoiceMinutes({
+    client,
+    guild,
+    guildId,
+    member,
+    voiceState,
+    serverCfg,
+    minutes,
+    perMinute,
+    channelId,
+}) {
+    if (!minutes || minutes <= 0) return { awarded: false, reason: 'no_minutes' };
+
+    const cfgVerifyRole = serverCfg?.verify_role_id ?? null;
+    const voiceEnabled = serverCfg?.voice_earn_enabled ?? true;
+    if (!cfgVerifyRole) return { awarded: false, reason: 'no_verify_role' };
+    if (!voiceEnabled) return { awarded: false, reason: 'voice_disabled' };
+
+    const categoryId = voiceState?.channel?.parentId || voiceState?.channel?.parent_id || null;
+    if (!passesVoiceChannelFilter(serverCfg, channelId, categoryId)) {
+        return { awarded: false, reason: 'channel_filtered' };
+    }
+
+    // Roller cache'de eksik olabilir
+    let resolvedMember = member;
+    try {
+        if (!resolvedMember?.roles?.cache?.has?.(cfgVerifyRole)) {
+            resolvedMember = await guild.members.fetch(member.id).catch(() => member);
+        }
+    } catch {
+        resolvedMember = member;
+    }
+
+    const isApproved = Boolean(resolvedMember?.roles?.cache?.has(cfgVerifyRole));
+    if (!isApproved) return { awarded: false, reason: 'missing_verify_role' };
+
+    const voiceCheck = isVoiceEligible(voiceState, {
+        spam_voice_block_alone: serverCfg?.spam_voice_block_alone,
+        spam_voice_block_mute_deaf: serverCfg?.spam_voice_block_mute_deaf,
+    });
+    if (!voiceCheck.allowed) {
+        console.log(`[antiSpam] voice skip guild:${guildId} user:${member.id} reason:${voiceCheck.reason}`);
+        return { awarded: false, reason: voiceCheck.reason };
+    }
+
+    const permissionCache = require('./permissionCache');
+    let hasTag = false;
+    let isBooster = false;
+    let memberTagId = null;
+    const tagId = serverCfg?.tag_id ?? null;
+    const tagBonusVoice = Number(serverCfg?.tag_bonus_voice ?? 0) || 0;
+    const boosterBonusVoice = Number(serverCfg?.booster_bonus_voice ?? 0) || 0;
+
+    try {
+        const entry = await permissionCache.get(client, guildId, member.id);
+        if (entry) {
+            hasTag = Boolean(entry.hasTag);
+            isBooster = Boolean(entry.isBooster);
+            if (entry.memberTagId) memberTagId = entry.memberTagId;
+        } else {
+            const { getMemberServerTagId, getMemberPrimaryGuildId } = require('../utils/memberTag');
+            memberTagId = getMemberServerTagId(resolvedMember);
+            const memberPrimaryGuildId = getMemberPrimaryGuildId(resolvedMember);
+            hasTag = Boolean(tagId && (String(memberPrimaryGuildId) === String(tagId) || String(memberTagId) === String(tagId)));
+            isBooster = Boolean(resolvedMember?.premiumSinceTimestamp || resolvedMember?.premiumSince);
+            permissionCache.updateForMember(client, guildId, resolvedMember).catch(() => null);
+        }
+    } catch (e) {
+        const { getMemberServerTagId, getMemberPrimaryGuildId } = require('../utils/memberTag');
+        memberTagId = getMemberServerTagId(resolvedMember || {});
+        const memberPrimaryGuildId = getMemberPrimaryGuildId(resolvedMember || {});
+        hasTag = Boolean(tagId && (String(memberPrimaryGuildId) === String(tagId) || String(memberTagId) === String(tagId)));
+        isBooster = Boolean(resolvedMember?.premiumSinceTimestamp || resolvedMember?.premiumSince);
+    }
+
+    let bonusPerMinute = 0;
+    if (hasTag) bonusPerMinute += tagBonusVoice;
+    if (isBooster) bonusPerMinute += boosterBonusVoice;
+
+    const totalRaw = Number(((perMinute + bonusPerMinute) * minutes).toFixed(2));
+    const total = await clampToDailyCap(guildId, member.id, 'voice', totalRaw, serverCfg?.daily_voice_earn_cap);
+    if (!total || total <= 0) {
+        console.log(`[antiSpam] voice daily cap reached guild:${guildId} user:${member.id}`);
+        return { awarded: false, reason: 'daily_cap' };
+    }
+
+    if (hasTag) {
+        try {
+            const { data: prof } = await supabase
+                .from('member_profiles')
+                .select('tag_granted_at')
+                .eq('guild_id', guildId)
+                .eq('user_id', member.id)
+                .maybeSingle();
+            if (!prof || !prof.tag_granted_at) {
+                await supabase.from('member_profiles').upsert(
+                    {
+                        guild_id: guildId,
+                        user_id: member.id,
+                        tag_granted_at: new Date().toISOString(),
+                        updated_at: new Date().toISOString(),
+                    },
+                    { onConflict: 'guild_id,user_id' }
+                );
+            }
+        } catch (e) {
+            console.warn('Failed to upsert tag_granted_at', e);
+        }
+    }
+
+    await addDailyEarning(guildId, member.id, 'voice', total, {
+        channelId,
+        base: perMinute,
+        bonus: bonusPerMinute,
+        minutes,
+        hasTag,
+        isBooster,
+        memberTagId: memberTagId ?? null,
+    });
+
+    try {
+        const statDate = new Date().toISOString().slice(0, 10);
+        await upsertMemberDailyStats(guildId, member.id, statDate, 0, minutes);
+        await upsertServerDailyStats(guildId, statDate, 0, minutes);
+    } catch (e) {
+        console.warn('Failed to upsert voice stats', e);
+    }
+
+    console.log(
+        `[earnings] voice awarded guild:${guildId} user:${member.id} minutes:${minutes} amount:${total} channel:${channelId}`
+    );
+    return { awarded: true, amount: total };
+}
 
 const addDailyEarning = async (guildId, userId, source, amount, metadata = {}) => {
     if (!amount || amount <= 0) return;
@@ -514,6 +763,7 @@ const processDailySettlement = async (guildId) => {
 module.exports = {
     addBalance,
     processVoiceEarnings,
+    handleVoiceStateForEarnings,
     addDailyEarning,
     clampToDailyCap,
     processDailySettlement,
