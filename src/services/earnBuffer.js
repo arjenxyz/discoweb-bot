@@ -165,7 +165,6 @@ async function flushEarnBuffer(reason = 'manual') {
   buffer.clear();
 
   let flushed = 0;
-  const profileSeen = new Set();
   const tagSeen = new Set();
   const serverMsgStats = new Map();
   const serverVoiceStats = new Map();
@@ -212,45 +211,33 @@ async function flushEarnBuffer(reason = 'manual') {
         }
 
         const profileKey = `${entry.guildId}:${entry.userId}`;
-        if (entry.username && !profileSeen.has(profileKey)) {
-          profileSeen.add(profileKey);
-          const { error: profileErr } = await supabase
-            .from('member_profiles')
-            .upsert(
-              {
-                user_id: entry.userId,
-                guild_id: entry.guildId,
-                username: entry.username,
-                updated_at: new Date().toISOString(),
-              },
-              { onConflict: 'user_id,guild_id' }
-            );
-          if (profileErr) {
-            console.warn('[earnBuffer] profile upsert skipped', profileErr.message);
-          }
-        }
-
+        // member_profiles has no username column in production schema — skip name sync.
+        // Only ensure row exists for tag tracking when needed.
         if (entry.hasTag && !tagSeen.has(profileKey)) {
           tagSeen.add(profileKey);
-          const { data: prof } = await supabase
-            .from('member_profiles')
-            .select('tag_granted_at')
-            .eq('guild_id', entry.guildId)
-            .eq('user_id', entry.userId)
-            .maybeSingle();
-          if (!prof?.tag_granted_at) {
-            const { error: tagErr } = await supabase.from('member_profiles').upsert(
-              {
-                guild_id: entry.guildId,
-                user_id: entry.userId,
-                tag_granted_at: new Date().toISOString(),
-                updated_at: new Date().toISOString(),
-              },
-              { onConflict: 'guild_id,user_id' }
-            );
-            if (tagErr) {
-              console.warn('[earnBuffer] tag upsert skipped', tagErr.message);
+          try {
+            const { data: prof } = await supabase
+              .from('member_profiles')
+              .select('tag_granted_at')
+              .eq('guild_id', entry.guildId)
+              .eq('user_id', entry.userId)
+              .maybeSingle();
+            if (!prof?.tag_granted_at) {
+              const { error: tagErr } = await supabase.from('member_profiles').upsert(
+                {
+                  guild_id: entry.guildId,
+                  user_id: entry.userId,
+                  tag_granted_at: new Date().toISOString(),
+                  updated_at: new Date().toISOString(),
+                },
+                { onConflict: 'guild_id,user_id' }
+              );
+              if (tagErr) {
+                console.warn('[earnBuffer] tag upsert skipped', tagErr.message);
+              }
             }
+          } catch (err) {
+            console.warn('[earnBuffer] tag upsert skipped', err.message);
           }
         }
       } catch (err) {

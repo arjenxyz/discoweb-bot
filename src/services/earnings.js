@@ -113,7 +113,6 @@ const processVoiceEarnings = async (client, guildId, requiredRoleId, earnPerVoic
 
     const serverCfg = await getVoiceServerConfig(guildId);
     if (!serverCfg) {
-        console.warn(`[earnings] voice skip guild:${guildId} — servers kaydı yok / config okunamadı`);
         return;
     }
 
@@ -324,6 +323,8 @@ const handleVoiceStateForEarnings = async (oldState, newState) => {
 
 const voiceConfigCache = new Map(); // guildId -> { ts, data }
 const VOICE_CONFIG_TTL = Number(process.env.VOICE_CONFIG_TTL_MS || 5 * 60 * 1000);
+const VOICE_MISSING_TTL = Number(process.env.VOICE_MISSING_TTL_MS || 30 * 60 * 1000);
+const voiceMissingLogged = new Set(); // guildIds already warned once
 const voiceSessions = new Map(); // guildId:userId -> { joinedAt, lastAwardAt, channelId }
 
 function voiceKey(guildId, userId) {
@@ -331,33 +332,45 @@ function voiceKey(guildId, userId) {
 }
 
 function invalidateVoiceConfig(guildId) {
-    if (guildId) voiceConfigCache.delete(String(guildId));
-    else voiceConfigCache.clear();
+    if (guildId) {
+        voiceConfigCache.delete(String(guildId));
+        voiceMissingLogged.delete(String(guildId));
+    } else {
+        voiceConfigCache.clear();
+        voiceMissingLogged.clear();
+    }
 }
 
 async function getVoiceServerConfig(guildId) {
-    const cached = voiceConfigCache.get(guildId);
+    const key = String(guildId);
+    const cached = voiceConfigCache.get(key);
     const now = Date.now();
-    if (cached && now - cached.ts < VOICE_CONFIG_TTL) return cached.data;
+    const ttl = cached?.missing ? VOICE_MISSING_TTL : VOICE_CONFIG_TTL;
+    if (cached && now - cached.ts < ttl) return cached.data;
 
     try {
         // select('*') — eksik kolon yüzünden tüm sorgunun düşmesini engeller
         const { data, error } = await supabase
             .from('servers')
             .select('*')
-            .eq('discord_id', guildId)
+            .eq('discord_id', key)
             .maybeSingle();
 
         if (error) {
-            console.error(`[earnings] getVoiceServerConfig error guild:${guildId}`, error.message);
-            voiceConfigCache.set(guildId, { ts: now, data: null });
+            console.error(`[earnings] getVoiceServerConfig error guild:${key}`, error.message);
+            voiceConfigCache.set(key, { ts: now, data: null, missing: true });
             return null;
         }
 
-        voiceConfigCache.set(guildId, { ts: now, data: data || null });
+        const missing = !data;
+        if (missing && !voiceMissingLogged.has(key)) {
+            voiceMissingLogged.add(key);
+            console.warn(`[earnings] voice skip guild:${key} — servers kaydı yok (setup edilmemiş, sessiz skip)`);
+        }
+        voiceConfigCache.set(key, { ts: now, data: data || null, missing });
         return data || null;
     } catch (e) {
-        console.error(`[earnings] getVoiceServerConfig unexpected guild:${guildId}`, e.message);
+        console.error(`[earnings] getVoiceServerConfig unexpected guild:${key}`, e.message);
         return null;
     }
 }
@@ -482,6 +495,38 @@ const addDailyEarning = async (guildId, userId, source, amount, metadata = {}) =
 
     const earningDate = getLocalDate(180); // Default timezone offset
     const dateIso = earningDate.toISOString().slice(0, 10);
+    const addAmount = Number(Number(amount).toFixed(2));
+
+    // Prefer atomic RPC to avoid reopen/add races under concurrent flushes
+    try {
+        const { data: rpcAmount, error: rpcErr } = await supabase.rpc('apply_daily_earning', {
+            p_guild_id: guildId,
+            p_user_id: userId,
+            p_source: source,
+            p_earning_date: dateIso,
+            p_amount: addAmount,
+        });
+
+        if (!rpcErr) {
+            const nextAmount = Number(rpcAmount ?? addAmount);
+            // Heuristic log: exact addAmount after prior settle ≈ reopen; larger = accumulate
+            if (nextAmount === addAmount) {
+                console.log(`[earnings] addDailyEarning applied - guild:${guildId} user:${userId} source:${source} amount:${nextAmount} date:${dateIso}`);
+            } else {
+                console.log(`[earnings] addDailyEarning updated - guild:${guildId} user:${userId} source:${source} amount:${nextAmount} date:${dateIso}`);
+            }
+            return;
+        }
+
+        // Fallback if RPC not migrated yet
+        if (!/function|does not exist|schema cache/i.test(rpcErr.message || '')) {
+            console.error(`[earnings] addDailyEarning rpc FAILED - guild:${guildId} user:${userId}`, rpcErr.message);
+        } else {
+            console.warn('[earnings] apply_daily_earning RPC missing — using legacy path');
+        }
+    } catch (e) {
+        console.warn('[earnings] apply_daily_earning RPC error — using legacy path', e.message);
+    }
 
     const { data: existing, error: selErr } = await supabase
         .from('daily_earnings')
@@ -498,28 +543,55 @@ const addDailyEarning = async (guildId, userId, source, amount, metadata = {}) =
 
     if (existing?.id) {
         if (existing.settled_at) {
-            // Kullanıcı bugünkü kazancını zaten aldı: sıfırdan yeni biriken oluştur.
-            // settled_at temizlenerek miktar sadece claim sonrası kazanılan kadar olur.
-            const { error: updErr } = await supabase
+            // Optimistic reopen: only if still settled (lost race → fall through to additive)
+            const { data: reopened, error: updErr } = await supabase
                 .from('daily_earnings')
                 .update({
-                    amount: Number(amount.toFixed(2)),
+                    amount: addAmount,
                     settled_at: null,
                     updated_at: new Date().toISOString(),
                 })
-                .eq('id', existing.id);
+                .eq('id', existing.id)
+                .not('settled_at', 'is', null)
+                .select('id,amount')
+                .maybeSingle();
+
             if (updErr) {
                 console.error(`[earnings] addDailyEarning reopen FAILED - guild:${guildId} user:${userId}`, updErr.message);
-            } else {
-                console.log(`[earnings] addDailyEarning reopened (post-claim) - guild:${guildId} user:${userId} source:${source} amount:${amount} date:${dateIso}`);
+                return;
+            }
+
+            if (reopened?.id) {
+                console.log(`[earnings] addDailyEarning reopened (post-claim) - guild:${guildId} user:${userId} source:${source} amount:${addAmount} date:${dateIso}`);
+                return;
+            }
+
+            // Race: another writer already cleared settled_at — additive path
+            const { data: fresh } = await supabase
+                .from('daily_earnings')
+                .select('id,amount,settled_at')
+                .eq('id', existing.id)
+                .maybeSingle();
+            if (fresh?.id && !fresh.settled_at) {
+                const nextAmount = Number(Number(fresh.amount || 0) + addAmount).toFixed(2);
+                const { error: addErr } = await supabase
+                    .from('daily_earnings')
+                    .update({ amount: Number(nextAmount), updated_at: new Date().toISOString() })
+                    .eq('id', fresh.id)
+                    .is('settled_at', null);
+                if (addErr) {
+                    console.error(`[earnings] addDailyEarning update FAILED - guild:${guildId} user:${userId}`, addErr.message);
+                } else {
+                    console.log(`[earnings] addDailyEarning updated - guild:${guildId} user:${userId} source:${source} amount:${nextAmount} date:${dateIso}`);
+                }
             }
         } else {
-            // Normal biriktirme: mevcut unsettled satıra ekle
-            const nextAmount = Number(existing.amount || 0) + amount;
+            const nextAmount = Number(Number(existing.amount || 0) + addAmount).toFixed(2);
             const { error: updErr } = await supabase
                 .from('daily_earnings')
-                .update({ amount: Number(nextAmount.toFixed(2)), updated_at: new Date().toISOString() })
-                .eq('id', existing.id);
+                .update({ amount: Number(nextAmount), updated_at: new Date().toISOString() })
+                .eq('id', existing.id)
+                .is('settled_at', null);
             if (updErr) {
                 console.error(`[earnings] addDailyEarning update FAILED - guild:${guildId} user:${userId}`, updErr.message);
             } else {
@@ -532,12 +604,38 @@ const addDailyEarning = async (guildId, userId, source, amount, metadata = {}) =
             user_id: userId,
             source,
             earning_date: dateIso,
-            amount: Number(amount.toFixed(2)),
+            amount: addAmount,
         });
         if (insErr) {
+            // Unique conflict — retry via additive update
+            if (insErr.code === '23505' || /duplicate|unique/i.test(insErr.message || '')) {
+                const { data: raced } = await supabase
+                    .from('daily_earnings')
+                    .select('id,amount,settled_at')
+                    .eq('guild_id', guildId)
+                    .eq('user_id', userId)
+                    .eq('source', source)
+                    .eq('earning_date', dateIso)
+                    .maybeSingle();
+                if (raced?.id) {
+                    const nextAmount = raced.settled_at
+                        ? addAmount
+                        : Number(Number(raced.amount || 0) + addAmount).toFixed(2);
+                    await supabase
+                        .from('daily_earnings')
+                        .update({
+                            amount: Number(nextAmount),
+                            settled_at: null,
+                            updated_at: new Date().toISOString(),
+                        })
+                        .eq('id', raced.id);
+                    console.log(`[earnings] addDailyEarning updated - guild:${guildId} user:${userId} source:${source} amount:${nextAmount} date:${dateIso}`);
+                    return;
+                }
+            }
             console.error(`[earnings] addDailyEarning insert FAILED - guild:${guildId} user:${userId} source:${source} error:`, insErr.message);
         } else {
-            console.log(`[earnings] addDailyEarning inserted - guild:${guildId} user:${userId} source:${source} amount:${amount} date:${dateIso}`);
+            console.log(`[earnings] addDailyEarning inserted - guild:${guildId} user:${userId} source:${source} amount:${addAmount} date:${dateIso}`);
         }
     }
 };

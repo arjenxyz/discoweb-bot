@@ -96,8 +96,6 @@ async function sendStoreLog(guildId, embed) {
 const processStoreOrders = async (client, guildId) => {
     if (!client.isReady()) return;
 
-    console.log(`🔄 ${guildId} için store orders kontrol ediliyor...`);
-
     try {
         const nowIso = new Date().toISOString();
 
@@ -108,14 +106,21 @@ const processStoreOrders = async (client, guildId) => {
             .eq('discord_id', guildId)
             .maybeSingle();
 
-        if (serverError || !server) {
-            await handleError('SERVER_NOT_FOUND', 'DATA', {
+        if (serverError) {
+            await handleError('DATABASE_ERROR', 'SYSTEM', {
                 guildId,
-                error: serverError || new Error('Server not found'),
+                error: serverError,
                 client
             });
             return;
         }
+
+        // Bot'un olduğu ama setup edilmemiş (hayalet) sunucular — gürültü yapma
+        if (!server) {
+            return;
+        }
+
+        console.log(`🔄 ${guildId} için store orders kontrol ediliyor...`);
 
         const { data: pendingOrders, error: pendingError } = await supabase
             .from('store_orders')
