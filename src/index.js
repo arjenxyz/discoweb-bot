@@ -24,6 +24,7 @@ const { sendSystemMail } = require('./utils/notifications');
 const { formatUser, truncate } = require('./core/logger');
 const { logToChannel, clearCache: clearLogCache } = require('./utils/logChannels');
 const quizCron = require('./utils/quizCron');
+const { startEarnBuffer, stopEarnBuffer } = require('./services/earnBuffer');
 
 const isClientReady = (botClient) => {
     return botClient && typeof botClient.isReady === 'function' && botClient.isReady();
@@ -694,8 +695,20 @@ client.once('ready', async () => {
     // Anti-spam cleanup every 5 minutes
     setInterval(() => antiSpam.cleanup(), 5 * 60 * 1000);
 
+    // Message/voice earn buffer flusher
+    startEarnBuffer();
+
     // Quiz Event cron — web tarafındaki /api/cron/quiz-tick ve /api/cron/quiz-payout'u tetikler
     quizCron.start();
+});
+
+process.on('SIGINT', async () => {
+    try { await stopEarnBuffer(); } catch {}
+    process.exit(0);
+});
+process.on('SIGTERM', async () => {
+    try { await stopEarnBuffer(); } catch {}
+    process.exit(0);
 });
 
 // Mesaj Geldiğinde (Prefix komutları için)
