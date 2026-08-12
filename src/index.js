@@ -638,8 +638,8 @@ client.once('ready', async () => {
     setInterval(() => {
         void (async () => {
             try {
-                const { isBotMaintenanceActive } = require('./services/maintenanceGate');
-                if (await isBotMaintenanceActive()) return;
+                const { isBotWorkPaused } = require('./services/maintenanceGate');
+                if (await isBotWorkPaused()) return;
             } catch {
                 /* non-fatal */
             }
@@ -657,8 +657,8 @@ client.once('ready', async () => {
     setInterval(() => {
         void (async () => {
             try {
-                const { isBotMaintenanceActive } = require('./services/maintenanceGate');
-                if (await isBotMaintenanceActive()) return;
+                const { isBotWorkPaused } = require('./services/maintenanceGate');
+                if (await isBotWorkPaused()) return;
             } catch {
                 /* non-fatal */
             }
@@ -686,8 +686,8 @@ client.once('ready', async () => {
     const runVoiceTicks = () => {
         void (async () => {
             try {
-                const { isBotMaintenanceActive } = require('./services/maintenanceGate');
-                if (await isBotMaintenanceActive()) return;
+                const { isBotWorkPaused } = require('./services/maintenanceGate');
+                if (await isBotWorkPaused()) return;
             } catch {
                 /* non-fatal */
             }
@@ -703,8 +703,8 @@ client.once('ready', async () => {
     setInterval(() => {
         void (async () => {
             try {
-                const { isBotMaintenanceActive } = require('./services/maintenanceGate');
-                if (await isBotMaintenanceActive()) return;
+                const { isBotWorkPaused } = require('./services/maintenanceGate');
+                if (await isBotWorkPaused()) return;
             } catch {
                 /* non-fatal */
             }
@@ -742,8 +742,8 @@ process.on('SIGTERM', async () => {
 // Mesaj Geldiğinde (Prefix komutları için)
 client.on('messageCreate', async (message) => {
     try {
-        const { isBotMaintenanceActive } = require('./services/maintenanceGate');
-        if (await isBotMaintenanceActive()) return;
+        const { isBotWorkPaused } = require('./services/maintenanceGate');
+        if (await isBotWorkPaused()) return;
     } catch {
         /* non-fatal */
     }

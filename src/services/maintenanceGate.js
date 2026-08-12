@@ -40,6 +40,17 @@ async function isBotMaintenanceActive() {
   return next.active;
 }
 
+/** True when bot work must pause (emergency stop or bot maintenance). */
+async function isBotWorkPaused() {
+  try {
+    const { isIncidentActive } = require('./incidentGate');
+    if (await isIncidentActive()) return true;
+  } catch {
+    /* non-fatal */
+  }
+  return isBotMaintenanceActive();
+}
+
 async function getBotMaintenanceStatus() {
   if (Date.now() - cache.at >= TTL_MS) {
     await refreshBotMaintenanceStatus();
@@ -57,6 +68,7 @@ function setMaintenanceGateActive(active, reason = null) {
 
 module.exports = {
   isBotMaintenanceActive,
+  isBotWorkPaused,
   getBotMaintenanceStatus,
   invalidateMaintenanceGate,
   setMaintenanceGateActive,

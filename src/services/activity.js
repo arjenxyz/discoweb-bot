@@ -7,8 +7,8 @@ const { supabase } = require('../core/database');
  */
 async function handleVoiceStateUpdate(oldState, newState) {
     try {
-        const { isBotMaintenanceActive } = require('./maintenanceGate');
-        if (await isBotMaintenanceActive()) return;
+        const { isBotWorkPaused } = require('./maintenanceGate');
+        if (await isBotWorkPaused()) return;
     } catch {
         /* non-fatal */
     }
