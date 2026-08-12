@@ -446,6 +446,47 @@ function startBotApi({ supabase, client, port = 3000 }) {
     }
   });
 
+  app.post('/api/maintenance-sync', async (req, res) => {
+    try {
+      const botApiKey = process.env.BOT_API_KEY;
+      if (botApiKey) {
+        const auth = req.headers.authorization || '';
+        if (auth !== `Bearer ${botApiKey}`) {
+          return res.status(403).json({ error: 'forbidden' });
+        }
+      }
+
+      const { active, reason } = req.body || {};
+      try {
+        const gate = require('../services/maintenanceGate');
+        if (typeof active === 'boolean') {
+          gate.setMaintenanceGateActive(active, reason || null);
+        } else {
+          gate.invalidateMaintenanceGate();
+          await gate.refreshBotMaintenanceStatus();
+        }
+        if (client?.user) {
+          const maintenanceStatus = await gate.getBotMaintenanceStatus();
+          const activityName = maintenanceStatus.isMaintenance
+            ? maintenanceStatus.reason || 'Bot bakımda'
+            : 'Hello There | v.2.03';
+          client.user.setPresence({
+            activities: [{ name: activityName, type: 3 }],
+            status: maintenanceStatus.isMaintenance ? 'dnd' : 'online',
+          });
+        }
+      } catch (e) {
+        console.warn('maintenance-sync gate update failed', e.message);
+      }
+
+      console.log(`[maintenance-sync] active=${Boolean(active)}`);
+      return res.json({ status: 'ok', active: Boolean(active) });
+    } catch (error) {
+      console.error('maintenance-sync error:', error);
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
   app.post('/api/broadcast-system', async (req, res) => {
     try {
       if (!ensureBotApiKey(req, res)) return;

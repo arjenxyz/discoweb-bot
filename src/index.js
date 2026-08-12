@@ -636,10 +636,17 @@ client.once('ready', async () => {
         }
 
     setInterval(() => {
-        // Tüm sunucular için store orders'ı işle
-        client.guilds.cache.forEach((guild) => {
-            void processStoreOrders(client, guild.id);
-        });
+        void (async () => {
+            try {
+                const { isBotMaintenanceActive } = require('./services/maintenanceGate');
+                if (await isBotMaintenanceActive()) return;
+            } catch {
+                /* non-fatal */
+            }
+            client.guilds.cache.forEach((guild) => {
+                void processStoreOrders(client, guild.id);
+            });
+        })();
     }, 5 * 60 * 1000); // 5 dakika
 
     setInterval(() => {
@@ -648,10 +655,17 @@ client.once('ready', async () => {
     }, 5 * 60 * 1000); // 5 dakika
 
     setInterval(() => {
-        // Tüm sunucular için gece yarısı işlemleri
-        client.guilds.cache.forEach((guild) => {
-            void processPendingOrdersAtMidnight(client, guild.id, config.timezoneOffsetMinutes);
-        });
+        void (async () => {
+            try {
+                const { isBotMaintenanceActive } = require('./services/maintenanceGate');
+                if (await isBotMaintenanceActive()) return;
+            } catch {
+                /* non-fatal */
+            }
+            client.guilds.cache.forEach((guild) => {
+                void processPendingOrdersAtMidnight(client, guild.id, config.timezoneOffsetMinutes);
+            });
+        })();
     }, 60000);
 
     // Discord Activity session + klasik ses join/leave tracking
@@ -670,26 +684,40 @@ client.once('ready', async () => {
 
     // Klasik ses kazancı yedek tick: her dakika aktif oturumlara tam dakika yaz
     const runVoiceTicks = () => {
-        client.guilds.cache.forEach((guild) => {
-            void processVoiceEarnings(client, guild.id, config.requiredRoleId, config.earnPerVoiceMinute);
-        });
+        void (async () => {
+            try {
+                const { isBotMaintenanceActive } = require('./services/maintenanceGate');
+                if (await isBotMaintenanceActive()) return;
+            } catch {
+                /* non-fatal */
+            }
+            client.guilds.cache.forEach((guild) => {
+                void processVoiceEarnings(client, guild.id, config.requiredRoleId, config.earnPerVoiceMinute);
+            });
+        })();
     };
     runVoiceTicks(); // bot açılınca bir kez
     setInterval(runVoiceTicks, 60 * 1000);
 
     // Auto-settlement at 00:00 TR (21:00 UTC) — check every minute
     setInterval(() => {
-        const now = new Date();
-        // TR time = UTC+3
-        const trHour = (now.getUTCHours() + 3) % 24;
-        const trMinute = now.getUTCMinutes();
-        // Trigger at 00:00 TR (allow 0-1 minute window)
-        if (trHour === 0 && trMinute === 0) {
-            console.log('[settlement] 00:00 TR — running auto-settlement for all guilds');
-            client.guilds.cache.forEach((guild) => {
-                void processDailySettlement(guild.id);
-            });
-        }
+        void (async () => {
+            try {
+                const { isBotMaintenanceActive } = require('./services/maintenanceGate');
+                if (await isBotMaintenanceActive()) return;
+            } catch {
+                /* non-fatal */
+            }
+            const now = new Date();
+            const trHour = (now.getUTCHours() + 3) % 24;
+            const trMinute = now.getUTCMinutes();
+            if (trHour === 0 && trMinute === 0) {
+                console.log('[settlement] 00:00 TR — running auto-settlement for all guilds');
+                client.guilds.cache.forEach((guild) => {
+                    void processDailySettlement(guild.id);
+                });
+            }
+        })();
     }, 60000);
 
     // Anti-spam cleanup every 5 minutes
@@ -713,6 +741,13 @@ process.on('SIGTERM', async () => {
 
 // Mesaj Geldiğinde (Prefix komutları için)
 client.on('messageCreate', async (message) => {
+    try {
+        const { isBotMaintenanceActive } = require('./services/maintenanceGate');
+        if (await isBotMaintenanceActive()) return;
+    } catch {
+        /* non-fatal */
+    }
+
     // Mesaj kazancı işle (bot mesajlarını handleMessage içinde filtreler)
     console.log(`[messageCreate] fired guild:${message.guild?.id} user:${message.author?.id} bot:${message.author?.bot}`);
     handleMessage(message, config).catch(err => console.error('[messageCreate] handleMessage error:', err));

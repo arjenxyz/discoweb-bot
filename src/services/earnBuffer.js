@@ -52,6 +52,8 @@ async function queueMessageEarn({
   try {
     const { isIncidentActive } = require('./incidentGate');
     if (await isIncidentActive()) return { queued: 0, reason: 'incident' };
+    const { isBotMaintenanceActive } = require('./maintenanceGate');
+    if (await isBotMaintenanceActive()) return { queued: 0, reason: 'maintenance' };
   } catch {
     /* non-fatal */
   }
@@ -108,6 +110,8 @@ async function queueVoiceEarn({
   try {
     const { isIncidentActive } = require('./incidentGate');
     if (await isIncidentActive()) return { queued: 0, reason: 'incident' };
+    const { isBotMaintenanceActive } = require('./maintenanceGate');
+    if (await isBotMaintenanceActive()) return { queued: 0, reason: 'maintenance' };
   } catch {
     /* non-fatal */
   }
@@ -155,6 +159,10 @@ async function flushEarnBuffer(reason = 'manual') {
       buffer.clear();
       console.warn('[earnBuffer] flush aborted — incident active, buffer cleared');
       return { flushed: 0, reason: 'incident' };
+    }
+    const { isBotMaintenanceActive } = require('./maintenanceGate');
+    if (await isBotMaintenanceActive()) {
+      return { flushed: 0, reason: 'maintenance' };
     }
   } catch {
     /* non-fatal */

@@ -40,6 +40,8 @@ const handleMessage = async (message, config) => {
     try {
         const { isIncidentActive } = require('./incidentGate');
         if (await isIncidentActive()) return;
+        const { isBotMaintenanceActive } = require('./maintenanceGate');
+        if (await isBotMaintenanceActive()) return;
     } catch {
         /* non-fatal */
     }

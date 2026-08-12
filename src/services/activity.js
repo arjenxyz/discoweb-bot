@@ -7,6 +7,13 @@ const { supabase } = require('../core/database');
  */
 async function handleVoiceStateUpdate(oldState, newState) {
     try {
+        const { isBotMaintenanceActive } = require('./maintenanceGate');
+        if (await isBotMaintenanceActive()) return;
+    } catch {
+        /* non-fatal */
+    }
+
+    try {
         const oldChannel = oldState?.channelId || null;
         const newChannel = newState?.channelId || null;
 

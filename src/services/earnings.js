@@ -98,6 +98,8 @@ const processVoiceEarnings = async (client, guildId, requiredRoleId, earnPerVoic
     try {
         const { isIncidentActive } = require('./incidentGate');
         if (await isIncidentActive()) return;
+        const { isBotMaintenanceActive } = require('./maintenanceGate');
+        if (await isBotMaintenanceActive()) return;
     } catch {
         /* non-fatal */
     }

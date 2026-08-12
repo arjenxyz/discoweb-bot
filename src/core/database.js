@@ -24,27 +24,10 @@ const getLocalDate = (timezoneOffsetMinutes) => {
     return new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()));
 };
 
-const getMaintenanceStatus = async (guildId) => {
+const getMaintenanceStatus = async (_guildId) => {
     try {
-        const { data: server } = await supabase
-            .from('servers')
-            .select('id')
-            .eq('discord_id', guildId)
-            .maybeSingle();
-
-        if (!server) return { isMaintenance: false, reason: null };
-
-        const { data } = await supabase
-            .from('maintenance_flags')
-            .select('is_active, reason')
-            .eq('server_id', server.id)
-            .eq('key', 'bot')
-            .maybeSingle();
-
-        return {
-            isMaintenance: data?.is_active || false,
-            reason: data?.reason || null
-        };
+        const { getBotMaintenanceStatus } = require('../services/maintenanceGate');
+        return await getBotMaintenanceStatus();
     } catch (error) {
         console.error('Maintenance status check error:', error);
         return { isMaintenance: false, reason: null };
