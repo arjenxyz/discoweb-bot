@@ -74,15 +74,12 @@ function createButtonRow(buttons) {
  */
 async function sendLog(guildId, channelType, embed, rows = null) {
     try {
-        const { data: logChannel, error } = await supabase
-            .from('bot_log_channels')
-            .select('webhook_url')
-            .eq('guild_id', guildId)
-            .eq('channel_type', channelType)
-            .eq('is_active', true)
-            .single();
+        const { resolveLogChannel } = require('../utils/guildLog');
+        const logChannel = await resolveLogChannel(guildId, channelType);
 
-        if (error || !logChannel?.webhook_url) {
+        if (!logChannel?.webhook_url) {
+            // Fallback: channel send is handled by guildLog when client is available;
+            // this webhook-only logger keeps previous behavior when webhook exists.
             return false;
         }
 
@@ -99,7 +96,6 @@ async function sendLog(guildId, channelType, embed, rows = null) {
             console.error(`[Logger] ${channelType} kanalına log gönderilemedi: ${response.status} ${response.statusText}`);
             return false;
         }
-
         return true;
     } catch (error) {
         console.error(`[Logger] ${channelType} kanalına log gönderilirken hata:`, error);

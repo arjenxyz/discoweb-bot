@@ -4,34 +4,21 @@ const { EmbedBuilder } = require('discord.js');
 const { isVoiceEligible } = require('./antiSpam');
 const { sendSystemMail } = require('../utils/notifications');
 const { renderEarningsAutoSettledHTML } = require('../utils/mailTemplates');
+const { sendGuildLog } = require('../utils/guildLog');
 
 // Log gönderme fonksiyonu
-async function sendWalletLog(guildId, embed) {
-    try {
-        const { data: logChannel } = await supabase
-            .from('bot_log_channels')
-            .select('channel_id')
-            .eq('guild_id', guildId)
-            .eq('channel_type', 'wallet')
-            .eq('is_active', true)
-            .maybeSingle();
-
-        if (!logChannel) return;
-
-        const guild = await getGuild(null, guildId);
-        if (!guild) return;
-
-        const channel = guild.channels.cache.get(logChannel.channel_id);
-        if (!channel) return;
-
-        await channel.send({ embeds: [embed] });
-    } catch (error) {
-        console.error('Wallet log gönderme hatası:', error);
-    }
+async function sendWalletLog(client, guildId, embed) {
+    await sendGuildLog({
+        client,
+        guildId,
+        channelType: 'wallet',
+        embed,
+    });
 }
 
-const addBalance = async (guildId, userId, amount, type, metadata = {}) => {
+const addBalance = async (guildId, userId, amount, type, metadata = {}, client = null) => {
     if (!amount || amount <= 0) return;
+    let next = null;
     try {
         console.log(`[earnings] addBalance called - guild:${guildId} user:${userId} amount:${amount} type:${type} metadata:${JSON.stringify(metadata)}`);
     } catch (e) {
@@ -48,25 +35,31 @@ const addBalance = async (guildId, userId, amount, type, metadata = {}) => {
 
         if (selErr) console.error('[earnings] addBalance - select wallet error', selErr);
 
-        const current = Number(wallet?.balance || 0);
-        const next = Number((current + amount).toFixed(2));
+        const current = Number(wallet?.balance ?? 0);
+        next = Number((current + Number(amount)).toFixed(2));
 
-        const { error: upsertErr } = await supabase.from('member_wallets').upsert({
-            guild_id: guildId,
-            user_id: userId,
-            balance: next,
-            updated_at: new Date().toISOString()
-        }, { onConflict: 'guild_id,user_id' });
+        const { error: upsertErr } = await supabase.from('member_wallets').upsert(
+            {
+                guild_id: guildId,
+                user_id: userId,
+                balance: next,
+                updated_at: new Date().toISOString(),
+            },
+            { onConflict: 'guild_id,user_id' },
+        );
+
         if (upsertErr) console.error('[earnings] addBalance - upsert wallet error', upsertErr);
 
         const { error: ledgerErr } = await supabase.from('wallet_ledger').insert({
             guild_id: guildId,
             user_id: userId,
-            amount,
-            type,
+            amount: Number(amount),
             balance_after: next,
-            metadata
+            type,
+            metadata,
+            created_at: new Date().toISOString(),
         });
+
         if (ledgerErr) console.error('[earnings] addBalance - insert wallet_ledger error', ledgerErr);
 
         console.log(`[earnings] addBalance applied - guild:${guildId} user:${userId} amount:${amount} type:${type} balance_after:${next}`);
@@ -75,7 +68,7 @@ const addBalance = async (guildId, userId, amount, type, metadata = {}) => {
     }
 
     // Para harcama logu
-    if (type === 'purchase') {
+    if (type === 'purchase' && next != null) {
         const embed = new EmbedBuilder()
             .setColor('#f44336')
             .setTitle('💸 Para Harcandı')
@@ -88,7 +81,7 @@ const addBalance = async (guildId, userId, amount, type, metadata = {}) => {
             )
             .setTimestamp();
 
-        await sendWalletLog(guildId, embed);
+        await sendWalletLog(client, guildId, embed);
     }
 };
 

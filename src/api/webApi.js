@@ -65,13 +65,8 @@ function startBotApi({ supabase, client, port = 3000 }) {
         return res.status(400).json({ error: 'Missing required fields' });
       }
 
-      const { data: logChannel } = await supabase
-        .from('bot_log_channels')
-        .select('channel_id, webhook_url')
-        .eq('guild_id', guildId)
-        .eq('channel_type', channelType)
-        .eq('is_active', true)
-        .maybeSingle();
+      const { resolveLogChannel } = require('../utils/guildLog');
+      const logChannel = await resolveLogChannel(guildId, channelType);
 
       if (!logChannel) {
         console.log('❌ Log channel not found for:', guildId, channelType);
@@ -275,27 +270,82 @@ function startBotApi({ supabase, client, port = 3000 }) {
         }).catch(() => null);
       };
 
+      const ensureWebhook = async (channel, label) => {
+        if (!channel) return null;
+        try {
+          const existing = await channel.fetchWebhooks().catch(() => null);
+          if (existing?.size) {
+            const wh = existing.first();
+            if (wh?.url) return wh.url;
+          }
+          const created = await channel.createWebhook({
+            name: `${label}-webhook`,
+            reason: 'DiscoWeb log channel webhook',
+          });
+          return created?.url || null;
+        } catch (err) {
+          console.warn(`[setup-server-logs] webhook failed for ${label}:`, err?.message || err);
+          return null;
+        }
+      };
+
       const developerDuyuruChannel = await createLogChannel('developer-duyuru');
       const adminLogChannel = await createLogChannel('admin-log');
       const magazaLogChannel = await createLogChannel('magaza-log');
       const cuzdanLogChannel = await createLogChannel('cuzdan-log');
 
-      if (!adminLogChannel || !magazaLogChannel || !cuzdanLogChannel || !developerDuyuruChannel) {
+      if (!adminLogChannel || !magazaLogChannel || !cuzdanLogChannel) {
         return res.status(500).json({ error: 'Kanallar oluşturulamadı. Botun "Kanal Yönetimi" yetkisine sahip olduğundan emin olun.' });
       }
 
-      // Veritabanına kaydet
-      await supabase.from('bot_log_channels').insert([
-          { guild_id: guildId, channel_type: 'system', channel_id: developerDuyuruChannel.id, is_active: true },
-          { guild_id: guildId, channel_type: 'admin_log', channel_id: adminLogChannel.id, is_active: true },
-          { guild_id: guildId, channel_type: 'store', channel_id: magazaLogChannel.id, is_active: true },
-          { guild_id: guildId, channel_type: 'wallet', channel_id: cuzdanLogChannel.id, is_active: true }
-      ]);
+      const adminWebhook = await ensureWebhook(adminLogChannel, 'admin');
+      const storeWebhook = await ensureWebhook(magazaLogChannel, 'store');
+      const walletWebhook = await ensureWebhook(cuzdanLogChannel, 'wallet');
+      const systemWebhook = developerDuyuruChannel
+        ? await ensureWebhook(developerDuyuruChannel, 'system')
+        : null;
+
+      // DB CHECK allows admin/store/wallet + web aliases (user_store, admin_*), not admin_log/system.
+      // Same Discord channel is registered under both bot + web type names.
+      const rows = [
+        { guild_id: guildId, channel_type: 'admin', channel_id: adminLogChannel.id, webhook_url: adminWebhook, is_active: true },
+        { guild_id: guildId, channel_type: 'admin_main', channel_id: adminLogChannel.id, webhook_url: adminWebhook, is_active: true },
+        { guild_id: guildId, channel_type: 'store', channel_id: magazaLogChannel.id, webhook_url: storeWebhook, is_active: true },
+        { guild_id: guildId, channel_type: 'user_store', channel_id: magazaLogChannel.id, webhook_url: storeWebhook, is_active: true },
+        { guild_id: guildId, channel_type: 'admin_store', channel_id: magazaLogChannel.id, webhook_url: storeWebhook, is_active: true },
+        { guild_id: guildId, channel_type: 'wallet', channel_id: cuzdanLogChannel.id, webhook_url: walletWebhook, is_active: true },
+        { guild_id: guildId, channel_type: 'admin_wallet', channel_id: cuzdanLogChannel.id, webhook_url: walletWebhook, is_active: true },
+      ];
+
+      if (developerDuyuruChannel) {
+        rows.push({
+          guild_id: guildId,
+          channel_type: 'admin_notifications',
+          channel_id: developerDuyuruChannel.id,
+          webhook_url: systemWebhook,
+          is_active: true,
+        });
+      }
+
+      const { error: insertError } = await supabase.from('bot_log_channels').insert(rows);
+      if (insertError) {
+        console.error('[setup-server-logs] bot_log_channels insert failed:', insertError);
+        return res.status(500).json({ error: 'Log kanalları oluşturuldu ama veritabanına kaydedilemedi', detail: insertError.message });
+      }
 
       const { clearCache } = require('../utils/logChannels');
       clearCache();
 
-      res.json({ success: true, channelId: adminLogChannel.id });
+      res.json({
+        success: true,
+        channelId: adminLogChannel.id,
+        channels: {
+          admin: adminLogChannel.id,
+          store: magazaLogChannel.id,
+          wallet: cuzdanLogChannel.id,
+          system: developerDuyuruChannel?.id || null,
+        },
+      });
     } catch (err) {
       console.error('setup-server-logs error:', err);
       res.status(500).json({ error: 'Internal server error' });

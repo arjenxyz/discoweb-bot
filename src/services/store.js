@@ -66,31 +66,18 @@ function renderDeliveryFailureHtml(orderId, failureCode = null) {
 </body></html>`;
 }
 
+const { sendGuildLog } = require('../utils/guildLog');
+
 let orderWorkerRunning = false;
 
 // Log gönderme fonksiyonu
-async function sendStoreLog(guildId, embed) {
-    try {
-        const { data: logChannel } = await supabase
-            .from('bot_log_channels')
-            .select('channel_id')
-            .eq('guild_id', guildId)
-            .eq('channel_type', 'store')
-            .eq('is_active', true)
-            .maybeSingle();
-
-        if (!logChannel) return;
-
-        const guild = await getGuild(null, guildId); // client null olabilir, guild'ı al
-        if (!guild) return;
-
-        const channel = guild.channels.cache.get(logChannel.channel_id);
-        if (!channel) return;
-
-        await channel.send({ embeds: [embed] });
-    } catch (error) {
-        console.error('Store log gönderme hatası:', error);
-    }
+async function sendStoreLog(client, guildId, embed) {
+    await sendGuildLog({
+        client,
+        guildId,
+        channelType: 'store',
+        embed,
+    });
 }
 
 const processStoreOrders = async (client, guildId) => {
@@ -352,7 +339,7 @@ const processStoreOrders = async (client, guildId) => {
                             )
                             .setTimestamp();
 
-                        await sendStoreLog(guildId, embed);
+                        await sendStoreLog(client, guildId, embed);
                     }
 
                     await supabase
