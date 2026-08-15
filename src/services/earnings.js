@@ -122,8 +122,14 @@ const processVoiceEarnings = async (client, guildId, requiredRoleId, earnPerVoic
         return;
     }
 
-    const perMinute = Number(
-        serverCfg.earn_per_voice_minute ?? earnPerVoiceMinute ?? process.env.PAPEL_PER_VOICE_MINUTE ?? 0.2
+    const perMinute = Math.min(
+      5000,
+      Math.max(
+        0,
+        Number(
+          serverCfg.earn_per_voice_minute ?? earnPerVoiceMinute ?? process.env.PAPEL_PER_VOICE_MINUTE ?? 0.2
+        ) || 0,
+      ),
     );
     if (!(perMinute > 0)) return;
 
@@ -257,8 +263,9 @@ const handleVoiceStateForEarnings = async (oldState, newState) => {
 
             const serverCfg = await getVoiceServerConfig(guildId);
             if (!serverCfg) return;
-            const perMinute = Number(
-                serverCfg.earn_per_voice_minute ?? process.env.PAPEL_PER_VOICE_MINUTE ?? 0.2
+            const perMinute = Math.min(
+                5000,
+                Math.max(0, Number(serverCfg.earn_per_voice_minute ?? process.env.PAPEL_PER_VOICE_MINUTE ?? 0.2) || 0),
             );
             if (!(perMinute > 0)) return;
 
@@ -285,8 +292,9 @@ const handleVoiceStateForEarnings = async (oldState, newState) => {
                 if (minutes > 0) {
                     const serverCfg = await getVoiceServerConfig(guildId);
                     if (serverCfg) {
-                        const perMinute = Number(
-                            serverCfg.earn_per_voice_minute ?? process.env.PAPEL_PER_VOICE_MINUTE ?? 0.2
+                        const perMinute = Math.min(
+                            5000,
+                            Math.max(0, Number(serverCfg.earn_per_voice_minute ?? process.env.PAPEL_PER_VOICE_MINUTE ?? 0.2) || 0),
                         );
                         if (perMinute > 0) {
                             await awardVoiceMinutes({
@@ -435,8 +443,8 @@ async function awardVoiceMinutes({
     let isBooster = false;
     let memberTagId = null;
     const tagId = serverCfg?.tag_id ?? null;
-    const tagBonusVoice = Number(serverCfg?.tag_bonus_voice ?? 0) || 0;
-    const boosterBonusVoice = Number(serverCfg?.booster_bonus_voice ?? 0) || 0;
+    const tagBonusVoice = Math.min(5000, Math.max(0, Number(serverCfg?.tag_bonus_voice ?? 0) || 0));
+    const boosterBonusVoice = Math.min(5000, Math.max(0, Number(serverCfg?.booster_bonus_voice ?? 0) || 0));
 
     try {
         const peeked = permissionCache.peek(guildId, member.id);

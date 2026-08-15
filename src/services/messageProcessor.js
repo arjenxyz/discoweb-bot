@@ -50,11 +50,11 @@ const handleMessage = async (message, config) => {
     if (!serverCfg) return;
 
     const requiredRoleId = serverCfg?.verify_role_id ?? null;
-    const earnPerMessage = Number(serverCfg?.earn_per_message ?? config.earnPerMessage) || 0;
+    const earnPerMessage = Math.min(5000, Math.max(0, Number(serverCfg?.earn_per_message ?? config.earnPerMessage) || 0));
     const messageEarnEnabled = serverCfg?.message_earn_enabled ?? true;
     const tagId = serverCfg?.tag_id ?? null;
-    const tagBonusMessage = Number(serverCfg?.tag_bonus_message ?? 0) || 0;
-    const boosterBonusMessage = Number(serverCfg?.booster_bonus_message ?? 0) || 0;
+    const tagBonusMessage = Math.min(5000, Math.max(0, Number(serverCfg?.tag_bonus_message ?? 0) || 0));
+    const boosterBonusMessage = Math.min(5000, Math.max(0, Number(serverCfg?.booster_bonus_message ?? 0) || 0));
     const earnChannels = serverCfg?.earn_channels ?? null;
 
     if (!messageEarnEnabled || !requiredRoleId || !(earnPerMessage > 0)) return;
