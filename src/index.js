@@ -911,11 +911,19 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
                 const now = newMember.roles ? Boolean(newMember.roles.cache.has(verifyRoleId)) : false;
                 if (had !== now) {
                     if (now) {
-                        const body = mailTemplates.renderRoleGained('Doğrulanmış Üye');
+                        const body = mailTemplates.renderRoleGained('Doğrulanmış Üye', newMember.user?.username);
                         await sendSystemMail({ guildId, userId, title: 'Yeni Rol Kazandın!', bodyHtml: body });
                     } else {
-                        const body = mailTemplates.renderRoleLost('Doğrulanmış Üye');
+                        const body = mailTemplates.renderRoleLost('Doğrulanmış Üye', newMember.user?.username);
                         await sendSystemMail({ guildId, userId, title: 'Rolü Kaybettin', bodyHtml: body });
+                        await supabase
+                            .from('member_profiles')
+                            .update({
+                                verify_access_revoked_at: new Date().toISOString(),
+                                updated_at: new Date().toISOString(),
+                            })
+                            .eq('guild_id', guildId)
+                            .eq('user_id', userId);
                     }
                 }
             }
